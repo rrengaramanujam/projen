@@ -3,9 +3,6 @@ import { synthSnapshot } from "../util";
 
 test("poetry enabled", () => {
   const p = new TestPythonProject({
-    venv: false,
-    pip: false,
-    setuptools: false,
     poetry: true,
     homepage: "http://www.example.com",
     description: "a short project description",
@@ -22,14 +19,74 @@ test("poetry enabled", () => {
   expect(snapshot["pyproject.toml"]).toContain(
     "Development Status :: 4 - Beta"
   );
-  expect(snapshot["pyproject.toml"]).toContain('python = "^3.6"'); // default python version
+  expect(snapshot["pyproject.toml"]).toContain('python = "^3.7"'); // default python version
+});
+
+test("poetry and venv fails", () => {
+  expect(
+    () =>
+      new TestPythonProject({
+        poetry: true,
+        venv: true,
+        homepage: "http://www.example.com",
+        description: "a short project description",
+        license: "Apache-2.0",
+        classifiers: ["Development Status :: 4 - Beta"],
+      })
+  ).toThrowError();
+});
+
+test("poetry and pip fails", () => {
+  expect(
+    () =>
+      new TestPythonProject({
+        poetry: true,
+        pip: true,
+        homepage: "http://www.example.com",
+        description: "a short project description",
+        license: "Apache-2.0",
+        classifiers: ["Development Status :: 4 - Beta"],
+      })
+  ).toThrowError();
+});
+
+test("poetry and setuptools fails", () => {
+  expect(
+    () =>
+      new TestPythonProject({
+        poetry: true,
+        setuptools: true,
+        homepage: "http://www.example.com",
+        description: "a short project description",
+        license: "Apache-2.0",
+        classifiers: ["Development Status :: 4 - Beta"],
+      })
+  ).toThrowError();
+});
+
+test("poetry enabled", () => {
+  const p = new TestPythonProject({
+    poetry: true,
+    homepage: "http://www.example.com",
+    description: "a short project description",
+    license: "Apache-2.0",
+    classifiers: ["Development Status :: 4 - Beta"],
+  });
+
+  const snapshot = synthSnapshot(p);
+  expect(snapshot["pyproject.toml"]).toContain("First Last");
+  expect(snapshot["pyproject.toml"]).toContain("email@example.com");
+  expect(snapshot["pyproject.toml"]).toContain("http://www.example.com");
+  expect(snapshot["pyproject.toml"]).toContain("a short project description");
+  expect(snapshot["pyproject.toml"]).toContain("Apache-2.0");
+  expect(snapshot["pyproject.toml"]).toContain(
+    "Development Status :: 4 - Beta"
+  );
+  expect(snapshot["pyproject.toml"]).toContain('python = "^3.7"'); // default python version
 });
 
 test("poetry enabled with specified python version", () => {
   const p = new TestPythonProject({
-    venv: false,
-    pip: false,
-    setuptools: false,
     poetry: true,
     homepage: "http://www.example.com",
     description: "a short project description",
@@ -44,9 +101,6 @@ test("poetry enabled with specified python version", () => {
 
 test("poetry enabled with poetry-specific options", () => {
   const p = new TestPythonProject({
-    venv: false,
-    pip: false,
-    setuptools: false,
     poetry: true,
     homepage: "http://www.example.com",
     description: "a short project description",
@@ -90,6 +144,41 @@ test("poetry enabled with poetry-specific options", () => {
   });
 
   expect(synthSnapshot(p)).toMatchSnapshot();
+});
+
+test("poetry enabled with metadata in dependencies", () => {
+  const p = new TestPythonProject({
+    poetry: true,
+    homepage: "http://www.example.com",
+    description: "a short project description",
+    license: "Apache-2.0",
+    classifiers: ["Development Status :: 4 - Beta"],
+    deps: [
+      "regular-version-package@1.2.3",
+      'package1@{version = "^3.3.3", extras = ["mypackage-extra"]}',
+      'package2@{ path = "../mypackage/foo" }',
+    ],
+  });
+
+  const snapshot = synthSnapshot(p);
+  // Rendered as a "normal" version
+  expect(snapshot["pyproject.toml"]).toContain(
+    'regular-version-package = "1.2.3"'
+  );
+  // package1 metadata should be rendered as its own section, and contain the specified metadata
+  expect(snapshot["pyproject.toml"]).toContain(
+    "[tool.poetry.dependencies.package1]"
+  );
+  expect(snapshot["pyproject.toml"]).toContain('version = "^3.3.3"');
+  expect(snapshot["pyproject.toml"]).toContain(
+    'extras = [ "mypackage-extra" ]'
+  );
+  // Likewise package2 metadata should be rendered
+  expect(snapshot["pyproject.toml"]).toContain(
+    "[tool.poetry.dependencies.package2]"
+  );
+  expect(snapshot["pyproject.toml"]).toContain('path = "../mypackage/foo"');
+  expect(snapshot["pyproject.toml"]).toMatchSnapshot();
 });
 
 class TestPythonProject extends python.PythonProject {

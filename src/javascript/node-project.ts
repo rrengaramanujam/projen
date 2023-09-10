@@ -1,4 +1,14 @@
 import { join } from "path";
+import { Bundler, BundlerOptions } from "./bundler";
+import { Jest, JestOptions } from "./jest";
+import {
+  CodeArtifactAuthProvider as NodePackageCodeArtifactAuthProvider,
+  CodeArtifactOptions,
+  NodePackage,
+  NodePackageManager,
+  NodePackageOptions,
+} from "./node-package";
+import { Projenrc, ProjenrcOptions } from "./projenrc";
 import { BuildWorkflow } from "../build";
 import { PROJEN_DIR, PROJEN_RC } from "../common";
 import {
@@ -10,9 +20,15 @@ import {
 } from "../github";
 import { DEFAULT_GITHUB_ACTIONS_USER } from "../github/constants";
 import { secretToString } from "../github/util";
-import { JobStep, Triggers } from "../github/workflows-model";
-import { IgnoreFile } from "../ignore-file";
 import {
+  JobPermission,
+  JobPermissions,
+  JobStep,
+  Triggers,
+} from "../github/workflows-model";
+import { IgnoreFile, IgnoreFileOptions } from "../ignore-file";
+import {
+  NpmConfig,
   Prettier,
   PrettierOptions,
   UpgradeDependencies,
@@ -20,26 +36,18 @@ import {
 } from "../javascript";
 import { License } from "../license";
 import {
+  CodeArtifactAuthProvider as ReleaseCodeArtifactAuthProvider,
+  CodeArtifactAuthProvider,
   isAwsCodeArtifactRegistry,
+  NpmPublishOptions,
   Publisher,
   Release,
   ReleaseProjectOptions,
-  NpmPublishOptions,
-  CodeArtifactAuthProvider as ReleaseCodeArtifactAuthProvider,
 } from "../release";
+import { filteredRunsOnOptions } from "../runner-options";
 import { Task } from "../task";
 import { deepMerge } from "../util";
 import { Version } from "../version";
-import { Bundler, BundlerOptions } from "./bundler";
-import { Jest, JestOptions } from "./jest";
-import {
-  CodeArtifactAuthProvider as NodePackageCodeArtifactAuthProvider,
-  CodeArtifactOptions,
-  NodePackage,
-  NodePackageManager,
-  NodePackageOptions,
-} from "./node-package";
-import { Projenrc, ProjenrcOptions } from "./projenrc";
 
 const PROJEN_SCRIPT = "projen";
 
@@ -95,7 +103,7 @@ export interface NodeProjectOptions
   /**
    * Define a GitHub workflow step for sending code coverage metrics to https://codecov.io/
    * Uses codecov/codecov-action@v3
-   * A secret is required for private repos. Configured with @codeCovTokenSecret
+   * A secret is required for private repos. Configured with `@codeCovTokenSecret`
    * @default false
    */
   readonly codeCov?: boolean;
@@ -157,6 +165,13 @@ export interface NodeProjectOptions
   readonly workflowNodeVersion?: string;
 
   /**
+   * Enable Node.js package cache in GitHub workflows.
+   *
+   * @default false
+   */
+  readonly workflowPackageCache?: boolean;
+
+  /**
    * Use dependabot to handle dependency upgrades.
    * Cannot be used in conjunction with `depsUpgrade`.
    *
@@ -172,7 +187,7 @@ export interface NodeProjectOptions
   readonly dependabotOptions?: DependabotOptions;
 
   /**
-   * Use github workflows to handle dependency upgrades.
+   * Use tasks and github workflows to handle dependency upgrades.
    * Cannot be used in conjunction with `dependabot`.
    *
    * @default true
@@ -203,6 +218,11 @@ export interface NodeProjectOptions
    * @default true
    */
   readonly npmignoreEnabled?: boolean;
+
+  /**
+   * Configuration options for .npmignore file
+   */
+  readonly npmIgnoreOptions?: IgnoreFileOptions;
 
   /**
    * Additional entries to .npmignore.
@@ -327,6 +347,11 @@ export class NodeProject extends GitHubProject {
   public readonly npmignore?: IgnoreFile;
 
   /**
+   * The .npmrc file
+   */
+  public readonly npmrc: NpmConfig;
+
+  /**
    * @deprecated use `package.allowLibraryDependencies`
    */
   public get allowLibraryDependencies(): boolean {
@@ -371,7 +396,7 @@ export class NodeProject extends GitHubProject {
   }
 
   /**
-   * Maximum node version required by this pacakge.
+   * Maximum node version required by this package.
    */
   public get maxNodeVersion(): string | undefined {
     return this.package.maxNodeVersion;
@@ -424,8 +449,9 @@ export class NodeProject extends GitHubProject {
    */
   public readonly upgradeWorkflow?: UpgradeDependencies;
 
-  private readonly workflowBootstrapSteps: JobStep[];
+  protected readonly workflowBootstrapSteps: JobStep[];
   private readonly workflowGitIdentity: GitIdentity;
+  protected readonly workflowPackageCache: boolean;
   public readonly prettier?: Prettier;
 
   constructor(options: NodeProjectOptions) {
@@ -435,6 +461,7 @@ export class NodeProject extends GitHubProject {
     this.workflowBootstrapSteps = options.workflowBootstrapSteps ?? [];
     this.workflowGitIdentity =
       options.workflowGitIdentity ?? DEFAULT_GITHUB_ACTIONS_USER;
+    this.workflowPackageCache = options.workflowPackageCache ?? false;
     this.artifactsDirectory = options.artifactsDirectory ?? "dist";
     this.artifactsJavascriptDirectory = join(this.artifactsDirectory, "js");
 
@@ -443,6 +470,7 @@ export class NodeProject extends GitHubProject {
         case NodePackageManager.NPM:
           return "npm run";
         case NodePackageManager.YARN:
+        case NodePackageManager.YARN2:
           return "yarn run";
         case NodePackageManager.PNPM:
           return "pnpm run";
@@ -451,19 +479,29 @@ export class NodeProject extends GitHubProject {
       }
     })();
 
+    const envCommand = (() => {
+      switch (this.packageManager) {
+        case NodePackageManager.PNPM:
+          return '$(pnpm -c exec "node --print process.env.PATH")';
+        default:
+          return '$(npx -c "node --print process.env.PATH")';
+      }
+    })();
+
     this.nodeVersion =
       options.workflowNodeVersion ?? this.package.minNodeVersion;
 
     // add PATH for all tasks which includes the project's npm .bin list
-    this.tasks.addEnvironment(
-      "PATH",
-      '$(npx -c "node -e \\"console.log(process.env.PATH)\\"")'
-    );
+    this.tasks.addEnvironment("PATH", envCommand);
 
     this.addLicense(options);
 
     if (options.npmignoreEnabled ?? true) {
-      this.npmignore = new IgnoreFile(this, ".npmignore");
+      this.npmignore = new IgnoreFile(
+        this,
+        ".npmignore",
+        options.npmIgnoreOptions
+      );
     }
 
     this.addDefaultGitIgnore();
@@ -514,6 +552,15 @@ export class NodeProject extends GitHubProject {
       this.jest = new Jest(this, options.jestOptions);
     }
 
+    const requiresIdTokenPermission =
+      (options.scopedPackagesOptions ?? []).length > 0 &&
+      options.codeArtifactOptions?.authProvider ===
+        CodeArtifactAuthProvider.GITHUB_OIDC;
+
+    const workflowPermissions: JobPermissions = {
+      idToken: requiresIdTokenPermission ? JobPermission.WRITE : undefined,
+    };
+
     if (buildEnabled && this.github) {
       this.buildWorkflow = new BuildWorkflow(this, {
         buildTask: this.buildTask,
@@ -525,8 +572,12 @@ export class NodeProject extends GitHubProject {
           mutable: options.mutableBuild ?? true,
         }),
         postBuildSteps: options.postBuildSteps,
-        runsOn: options.workflowRunsOn,
+        ...filteredRunsOnOptions(
+          options.workflowRunsOn,
+          options.workflowRunsOnGroup
+        ),
         workflowTriggers: options.buildWorkflowTriggers,
+        permissions: workflowPermissions,
       });
 
       this.buildWorkflow.addPostBuildSteps(
@@ -558,6 +609,7 @@ export class NodeProject extends GitHubProject {
         ],
 
         workflowNodeVersion: this.nodeVersion,
+        workflowPermissions,
       });
 
       this.publisher = this.release.publisher;
@@ -669,6 +721,7 @@ export class NodeProject extends GitHubProject {
             : undefined,
           labels: autoApproveLabel(depsAutoApprove),
           gitIdentity: this.workflowGitIdentity,
+          permissions: workflowPermissions,
         },
       };
       this.upgradeWorkflow = new UpgradeDependencies(
@@ -684,7 +737,7 @@ export class NodeProject extends GitHubProject {
     }
 
     const projenrcJs = options.projenrcJs ?? !options.projenrcJson;
-    if (projenrcJs) {
+    if (!this.parent && projenrcJs) {
       new Projenrc(this, options.projenrcJsOptions);
     }
 
@@ -703,6 +756,18 @@ export class NodeProject extends GitHubProject {
 
     if (options.prettier ?? false) {
       this.prettier = new Prettier(this, { ...options.prettierOptions });
+    }
+
+    // Create the .npmrc file
+    this.npmrc = new NpmConfig(this, {
+      omitEmpty: true,
+    });
+
+    // For PNPM, the default resolution mode is "lowest", which leads to any non-versioned (ie '*') dependencies being
+    // resolved to the lowest available version, which is unlikely to be expected behaviour for users. We set resolution
+    // mode to "highest" to match the behaviour of yarn and npm.
+    if (this.package.packageManager === NodePackageManager.PNPM) {
+      this.npmrc.addConfig("resolution-mode", "highest");
     }
   }
 
@@ -744,6 +809,16 @@ export class NodeProject extends GitHubProject {
   }
 
   /**
+   * Replaces the contents of multiple npm package.json scripts.
+   * @param scripts The scripts to set
+   */
+  public addScripts(scripts: { [name: string]: string }) {
+    for (const [name, command] of Object.entries(scripts)) {
+      this.package.setScript(name, command);
+    }
+  }
+
+  /**
    * Removes the npm script (always successful).
    * @param name The name of the script.
    */
@@ -754,6 +829,7 @@ export class NodeProject extends GitHubProject {
   /**
    * Indicates if a script by the name name is defined.
    * @param name The name of the script
+   * @deprecated Use `project.tasks.tryFind(name)`
    */
   public hasScript(name: string) {
     return this.package.hasScript(name);
@@ -812,13 +888,35 @@ export class NodeProject extends GitHubProject {
       secretAccessKeySecret:
         codeArtifactOptions?.secretAccessKeySecret ?? "AWS_SECRET_ACCESS_KEY",
       roleToAssume: codeArtifactOptions?.roleToAssume,
+      authProvider: codeArtifactOptions?.authProvider,
     };
+
+    if (
+      parsedCodeArtifactOptions.authProvider ===
+      NodePackageCodeArtifactAuthProvider.GITHUB_OIDC
+    ) {
+      return [
+        {
+          name: "Configure AWS Credentials",
+          uses: "aws-actions/configure-aws-credentials@v2",
+          with: {
+            "aws-region": "us-east-2",
+            "role-to-assume": parsedCodeArtifactOptions.roleToAssume,
+            "role-duration-seconds": 900,
+          },
+        },
+        {
+          name: "AWS CodeArtifact Login",
+          run: `${this.runScriptCommand} ca:login`,
+        },
+      ];
+    }
 
     if (parsedCodeArtifactOptions.roleToAssume) {
       return [
         {
           name: "Configure AWS Credentials",
-          uses: "aws-actions/configure-aws-credentials@v1",
+          uses: "aws-actions/configure-aws-credentials@v2",
           with: {
             "aws-access-key-id": secretToString(
               parsedCodeArtifactOptions.accessKeyIdSecret
@@ -869,19 +967,34 @@ export class NodeProject extends GitHubProject {
     // first run the workflow bootstrap steps
     install.push(...this.workflowBootstrapSteps);
 
-    if (this.nodeVersion) {
-      install.push({
-        name: "Setup Node.js",
-        uses: "actions/setup-node@v3",
-        with: { "node-version": this.nodeVersion },
-      });
-    }
-
     if (this.package.packageManager === NodePackageManager.PNPM) {
       install.push({
         name: "Setup pnpm",
-        uses: "pnpm/action-setup@v2.2.2",
-        with: { version: "7" }, // current latest. Should probably become tunable.
+        uses: "pnpm/action-setup@v2.2.4",
+        with: { version: this.package.pnpmVersion },
+      });
+    }
+
+    if (this.nodeVersion || this.workflowPackageCache) {
+      const cache =
+        this.package.packageManager === NodePackageManager.YARN
+          ? "yarn"
+          : this.package.packageManager === NodePackageManager.YARN2
+          ? "yarn"
+          : this.package.packageManager === NodePackageManager.PNPM
+          ? "pnpm"
+          : "npm";
+      install.push({
+        name: "Setup Node.js",
+        uses: "actions/setup-node@v3",
+        with: {
+          ...(this.nodeVersion && {
+            "node-version": this.nodeVersion,
+          }),
+          ...(this.workflowPackageCache && {
+            cache,
+          }),
+        },
       });
     }
 

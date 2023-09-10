@@ -1,26 +1,26 @@
-import { readFileSync } from "fs";
-import { join, resolve } from "path";
-import { parse as urlparse } from "url";
 import {
   accessSync,
   constants,
   existsSync,
   readdirSync,
-  readJsonSync,
-} from "fs-extra";
+  readFileSync,
+} from "fs";
+import { join, resolve } from "path";
+import * as semver from "semver";
+import {
+  extractCodeArtifactDetails,
+  minVersion,
+  tryResolveDependencyVersion,
+} from "./util";
 import { resolve as resolveJson } from "../_resolve";
 import { Component } from "../component";
-import { Dependencies, DependencyType } from "../dependencies";
+import { DependencyType } from "../dependencies";
 import { JsonFile } from "../json";
 import { Project } from "../project";
 import { isAwsCodeArtifactRegistry } from "../release";
 import { Task } from "../task";
-import { exec, isTruthy, sorted, writeFile } from "../util";
-import {
-  extractCodeArtifactDetails,
-  minVersion,
-  packageResolutionsFieldName,
-} from "./util";
+import { TaskRuntime } from "../task-runtime";
+import { isTruthy, sorted, writeFile } from "../util";
 
 const UNLICENSED = "UNLICENSED";
 const DEFAULT_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
@@ -158,8 +158,10 @@ export interface NodePackageOptions {
   /**
    * npm scripts to include. If a script has the same name as a standard script,
    * the standard script will be overwritten.
+   * Also adds the script as a task.
    *
    * @default {}
+   * @deprecated use `project.addTask()` or `package.setScript()`
    */
   readonly scripts?: { [name: string]: string };
 
@@ -225,6 +227,13 @@ export interface NodePackageOptions {
    * @default - no max
    */
   readonly maxNodeVersion?: string;
+
+  /**
+   * The version of PNPM to use if using PNPM as a package manager.
+   *
+   * @default "7"
+   */
+  readonly pnpmVersion?: string;
 
   /**
    * License's SPDX identifier.
@@ -414,10 +423,17 @@ export class NodePackage extends Component {
   public readonly minNodeVersion?: string;
 
   /**
-   * Maximum node version required by this pacakge.
+   * Maximum node version required by this package.
    * @default - no maximum.
    */
   public readonly maxNodeVersion?: string;
+
+  /**
+   * The version of PNPM to use if using PNPM as a package manager.
+   *
+   * @default "7"
+   */
+  public readonly pnpmVersion?: string;
 
   /**
    * The SPDX license of this module. `undefined` if this package is not licensed.
@@ -464,11 +480,27 @@ export class NodePackage extends Component {
    */
   public readonly lockFile: string;
 
+  /**
+   * The task for installing project dependencies (non-frozen)
+   */
+  public readonly installTask: Task;
+
+  /**
+   * The task for installing project dependencies (frozen)
+   */
+  public readonly installCiTask: Task;
+
+  /**
+   * The package.json file.
+   */
+  public readonly file: JsonFile;
+
+  private readonly scripts: Record<string, string> = {};
+  private readonly scriptsToBeRemoved = new Set<string>();
   private readonly keywords: Set<string> = new Set();
   private readonly bin: Record<string, string> = {};
   private readonly engines: Record<string, string> = {};
   private readonly peerDependencyOptions: PeerDependencyOptions;
-  private readonly file: JsonFile;
   private _renderedDeps?: NpmDependencies;
 
   constructor(project: Project, options: NodePackageOptions = {}) {
@@ -503,8 +535,6 @@ export class NodePackage extends Component {
 
     this.processDeps(options);
 
-    this.addCodeArtifactLoginScript();
-
     const prev = this.readPackageJson() ?? {};
 
     // empty objects are here to preserve order for backwards compatibility
@@ -525,12 +555,14 @@ export class NodePackage extends Component {
       peerDependencies: {},
       dependencies: {},
       bundledDependencies: [],
+      ...this.renderPackageResolutions(),
       keywords: () => this.renderKeywords(),
       engines: () => this.renderEngines(),
       main: this.entrypoint !== "" ? this.entrypoint : undefined,
       license: () => this.license ?? UNLICENSED,
       homepage: options.homepage,
       publishConfig: () => this.renderPublishConfig(),
+      typesVersions: prev?.typesVersions,
 
       // in release CI builds we bump the version before we run "build" so we want
       // to preserve the version number. otherwise, we always set it to 0.0.0
@@ -544,7 +576,8 @@ export class NodePackage extends Component {
           : undefined,
     };
 
-    // override any scripts from options (if specified)
+    // add tasks for scripts from options (if specified)
+    // @deprecated
     for (const [cmdname, shell] of Object.entries(options.scripts ?? {})) {
       project.addTask(cmdname, { exec: shell });
     }
@@ -567,12 +600,26 @@ export class NodePackage extends Component {
     // node version
     this.minNodeVersion = options.minNodeVersion;
     this.maxNodeVersion = options.maxNodeVersion;
+    this.pnpmVersion = options.pnpmVersion ?? "7";
     this.addNodeEngine();
+
+    this.addCodeArtifactLoginScript();
 
     // license
     if (options.licensed ?? true) {
       this.license = options.license ?? "Apache-2.0";
     }
+
+    this.installTask = project.addTask("install", {
+      description:
+        "Install project dependencies and update lockfile (non-frozen)",
+      exec: this.installAndUpdateLockfileCommand,
+    });
+
+    this.installCiTask = project.addTask("install:ci", {
+      description: "Install project dependencies using frozen lockfile",
+      exec: this.installCommand,
+    });
   }
 
   /**
@@ -682,21 +729,24 @@ export class NodePackage extends Component {
   }
 
   /**
-   * Override the contents of an npm package.json script.
+   * Add a npm package.json script.
    *
    * @param name The script name
    * @param command The command to execute
    */
   public setScript(name: string, command: string) {
-    this.file.addOverride(`scripts.${name}`, command);
+    this.scripts[name] = command;
   }
 
   /**
-   * Removes the npm script (always successful).
+   * Removes an npm script (always successful).
+   *
    * @param name The name of the script.
    */
   public removeScript(name: string) {
-    this.file.addDeletionOverride(`scripts.${name}`);
+    // need to keep track in case there's a task of the same name
+    this.scriptsToBeRemoved.add(name);
+    delete this.scripts[name];
   }
 
   /**
@@ -732,15 +782,11 @@ export class NodePackage extends Component {
    *
    * @param resolutions Names resolutions to be added. Specify a version or
    * range with this syntax:
-   * `module@^7`.
+   * `module@^7`
    */
   public addPackageResolutions(...resolutions: string[]) {
-    const fieldName = packageResolutionsFieldName(this.packageManager);
-
     for (const resolution of resolutions) {
       this.project.deps.addDependency(resolution, DependencyType.OVERRIDE);
-      const { name, version = "*" } = Dependencies.parseDependency(resolution);
-      this.file.addOverride(`${fieldName}.${name}`, version);
     }
   }
 
@@ -759,49 +805,29 @@ export class NodePackage extends Component {
   }
 
   /**
-   * Render a package manager specific command to upgrade all requested dependencies.
+   * Attempt to resolve the currently installed version for a given dependency.
+   *
+   * @remarks
+   * This method will first look through the current project's dependencies.
+   * If found and semantically valid (not '*'), that will be used.
+   * Otherwise, it will fall back to locating a `package.json` manifest for the dependency
+   * through node's internal resolution reading the version from there.
+   *
+   * @param dependencyName Dependency to resolve for.
    */
-  public renderUpgradePackagesCommand(
-    exclude: string[],
-    include?: string[]
-  ): string {
-    const project = this.project;
-    function upgradePackages(command: string) {
-      return () => {
-        if (exclude.length === 0 && !include) {
-          // request to upgrade all packages
-          // separated for asthetic reasons.
-          return command;
-        }
-
-        // filter by exclude and include.
-        return `${command} ${project.deps.all
-          .filter((d) => d.type !== DependencyType.OVERRIDE)
-          .map((d) => d.name)
-          .filter((d) => (include ? include.includes(d) : true))
-          .filter((d) => !exclude.includes(d))
-          .join(" ")}`;
-      };
-    }
-
-    let lazy = undefined;
-    switch (this.packageManager) {
-      case NodePackageManager.YARN:
-        lazy = upgradePackages("yarn upgrade");
-        break;
-      case NodePackageManager.NPM:
-        lazy = upgradePackages("npm update");
-        break;
-      case NodePackageManager.PNPM:
-        lazy = upgradePackages("pnpm update");
-        break;
-      default:
-        throw new Error(`unexpected package manager ${this.packageManager}`);
-    }
-
-    // return a lazy function so that dependencies include ones that were
-    // added post project instantiation (i.e using project.addDeps)
-    return lazy as unknown as string;
+  public tryResolveDependencyVersion(
+    dependencyName: string
+  ): string | undefined {
+    try {
+      const fromDeps = this.project.deps.tryGetDependency(dependencyName);
+      const version = semver.coerce(fromDeps?.version, { loose: true });
+      if (version) {
+        return version.format();
+      }
+    } catch {}
+    return tryResolveDependencyVersion(dependencyName, {
+      paths: [this.project.outdir],
+    });
   }
 
   // ---------------------------------------------------------------------------------------
@@ -873,7 +899,7 @@ export class NodePackage extends Component {
       npmRegistryUrl = `https://${options.npmRegistry}`;
     }
 
-    const npmr = urlparse(npmRegistryUrl ?? DEFAULT_NPM_REGISTRY_URL);
+    const npmr = new URL(npmRegistryUrl ?? DEFAULT_NPM_REGISTRY_URL);
     if (!npmr || !npmr.hostname || !npmr.href) {
       throw new Error(
         `unable to determine npm registry host from url ${npmRegistryUrl}. Is this really a URL?`
@@ -1009,8 +1035,9 @@ export class NodePackage extends Component {
             `npm config set ${scope}:registry ${registryUrl}`,
             `CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain ${domain} --region ${region} --domain-owner ${accountId} --query authorizationToken --output text)`,
             `npm config set //${registry}:_authToken=$CODEARTIFACT_AUTH_TOKEN`,
-            `npm config set //${registry}:always-auth=true`,
           ];
+          if (!this.minNodeVersion || semver.major(this.minNodeVersion) <= 16)
+            commands.push(`npm config set //${registry}:always-auth=true`);
           return {
             exec: commands.join("; "),
           };
@@ -1050,10 +1077,10 @@ export class NodePackage extends Component {
           "--check-files", // ensure all modules exist (especially projen which was just removed).
           ...(frozen ? ["--frozen-lockfile"] : []),
         ].join(" ");
-
+      case NodePackageManager.YARN2:
+        return ["yarn install", ...(frozen ? ["--immutable"] : [])].join(" ");
       case NodePackageManager.NPM:
         return frozen ? "npm ci" : "npm install";
-
       case NodePackageManager.PNPM:
         return frozen
           ? "pnpm i --frozen-lockfile"
@@ -1229,20 +1256,18 @@ export class NodePackage extends Component {
         let desiredVersion = currentDefinition;
 
         if (currentDefinition === "*") {
-          try {
-            const modulePath = require.resolve(`${name}/package.json`, {
-              paths: [outdir],
-            });
-            const module = readJsonSync(modulePath);
-            desiredVersion = `^${module.version}`;
-          } catch (e) {}
-
-          if (!desiredVersion) {
+          // we already know we don't have the version in project `deps`,
+          // so skip straight to checking manifest.
+          const resolvedVersion = tryResolveDependencyVersion(name, {
+            paths: [this.project.outdir],
+          });
+          if (!resolvedVersion) {
             this.project.logger.warn(
               `unable to resolve version for ${name} from installed modules`
             );
             continue;
           }
+          desiredVersion = `^${resolvedVersion}`;
         }
 
         if (currentDefinition !== desiredVersion) {
@@ -1309,6 +1334,32 @@ export class NodePackage extends Component {
 
     writeFile(rootPackageJson, updated);
     return true;
+  }
+
+  private renderPackageResolutions() {
+    const render = () => {
+      const overridingDependencies = this.project.deps.all.filter(
+        (dep) => dep.type === DependencyType.OVERRIDE
+      );
+      if (!overridingDependencies.length) {
+        return undefined;
+      }
+
+      return Object.fromEntries(
+        overridingDependencies.map(({ name, version = "*" }) => [name, version])
+      );
+    };
+
+    switch (this.packageManager) {
+      case NodePackageManager.NPM:
+        return { overrides: render };
+      case NodePackageManager.PNPM:
+        return { pnpm: { overrides: render } };
+      case NodePackageManager.YARN:
+      case NodePackageManager.YARN2:
+      default:
+        return { resolutions: render };
+    }
   }
 
   private renderPublishConfig() {
@@ -1381,13 +1432,25 @@ export class NodePackage extends Component {
 
   private renderScripts() {
     const result: any = {};
-    for (const task of this.project.tasks.all.sort((x, y) =>
-      x.name.localeCompare(y.name)
-    )) {
+    const tasks = this.project.tasks.all
+      .filter(
+        (t) =>
+          // Must remove to prevent overriding built-in npm command (which would loop)
+          t.name !== this.installTask.name && t.name !== this.installCiTask.name
+      )
+      .sort((x, y) => x.name.localeCompare(y.name));
+
+    for (const task of tasks) {
+      if (this.scriptsToBeRemoved.has(task.name)) {
+        continue;
+      }
       result[task.name] = this.npmScriptForTask(task);
     }
 
-    return result;
+    return {
+      ...result,
+      ...this.scripts,
+    };
   }
 
   private npmScriptForTask(task: Task) {
@@ -1400,13 +1463,16 @@ export class NodePackage extends Component {
       return undefined;
     }
 
-    return readJsonSync(file);
+    return JSON.parse(readFileSync(file, "utf-8"));
   }
 
   private installDependencies() {
-    exec(this.renderInstallCommand(this.isAutomatedBuild), {
-      cwd: this.project.outdir,
-    });
+    this.project.logger.info("Installing dependencies...");
+    const runtime = new TaskRuntime(this.project.outdir);
+    const taskToRun = this.isAutomatedBuild
+      ? this.installCiTask
+      : this.installTask;
+    runtime.runTask(taskToRun.name);
   }
 }
 
@@ -1426,6 +1492,11 @@ export enum NodePackageManager {
    * Use `yarn` as the package manager.
    */
   YARN = "yarn",
+
+  /**
+   * Use `yarn` versions >= 2 as the package manager.
+   */
+  YARN2 = "yarn2",
 
   /**
    * Use `npm` as the package manager.
@@ -1488,7 +1559,10 @@ export function defaultNpmToken(
 }
 
 function determineLockfile(packageManager: NodePackageManager) {
-  if (packageManager === NodePackageManager.YARN) {
+  if (
+    packageManager === NodePackageManager.YARN ||
+    packageManager === NodePackageManager.YARN2
+  ) {
     return "yarn.lock";
   } else if (packageManager === NodePackageManager.NPM) {
     return "package-lock.json";

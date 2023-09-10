@@ -1,17 +1,20 @@
 // tests for `projen new`: we run `projen new` for each supported project type
 // and compare against a golden snapshot.
+import { execSync } from "child_process";
+import { mkdirSync, existsSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
-import { pathExistsSync } from "fs-extra";
-import * as inventory from "../src/inventory";
-import { execCapture } from "../src/util";
 import {
   directorySnapshot,
   execProjenCLI,
+  mkdtemp,
+  sanitizeOutput,
   synthSnapshot,
   synthSnapshotWithPost,
   TestProject,
   withProjectDir,
 } from "./util";
+import * as inventory from "../src/inventory";
+import { execCapture } from "../src/util";
 
 for (const type of inventory.discover()) {
   test(`projen new ${type.pjid}`, () => {
@@ -19,7 +22,7 @@ for (const type of inventory.discover()) {
       // execute `projen new PJID --no-synth` in the project directory
       execProjenCLI(projectdir, ["new", "--no-synth", type.pjid]);
 
-      // compare generated .projenrc.js to the snapshot
+      // compare generated snapshot
       const actual = directorySnapshot(projectdir, {
         excludeGlobs: [".git/**"],
       });
@@ -41,127 +44,232 @@ test("post-synthesis option disabled", () => {
   expect(synthSnapshot(project)[".postsynth"]).toBeUndefined();
 });
 
-/**
- * commented out due to breaking changes in projen@0.37.0
-
-test('projen new --from external', () => {
-  withProjectDir(projectdir => {
-
-    // execute `projen new --from cdk-appsync-project` in the project directory
-    execProjenCLI(projectdir, ['new', '--from', 'cdk-appsync-project@1.1.3', '--no-post', MIN_NODE_VERSION_OPTION]);
+test("projen new --from external", () => {
+  withProjectDir((projectdir) => {
+    // execute `projen new --from @pepperize/projen-awscdk-app-ts@0.0.333` in the project directory
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@0.0.333",
+      "--no-post",
+    ]);
 
     // patch the projen version in package.json to match the current version
     // otherwise, every bump would need to update these snapshots.
     sanitizeOutput(projectdir);
 
-    // compare generated .projenrc.js to the snapshot
+    // compare generated snapshot
     const actual = directorySnapshot(projectdir, {
-      excludeGlobs: [
-        '.git/**',
-        '.github/**',
-        'node_modules/**',
-        'yarn.lock',
-      ],
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
     });
 
-    expect(actual).toMatchSnapshot();
-    expect(actual['schema.graphql']).toBeDefined();
-
+    expect(actual["package.json"]).toBeDefined();
+    expect(actual["package.json"]).toMatchSnapshot();
+    expect(actual[".projenrc.ts"]).toBeDefined();
+    expect(actual[".projenrc.ts"]).toMatchSnapshot();
   });
 });
 
-test('projen new --from external tarball', () => {
-  withProjectDir(projectdir => {
+test("projen new --from external with enum values", () => {
+  withProjectDir((projectdir) => {
+    // execute `projen new --from @pepperize/projen-awscdk-app-ts@0.0.333` in the project directory
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@0.0.333",
+      "--package-manager=npm",
+      "--no-post",
+    ]);
+
+    // patch the projen version in package.json to match the current version
+    // otherwise, every bump would need to update these snapshots.
+    sanitizeOutput(projectdir);
+
+    // compare generated snapshot
+    const actual = directorySnapshot(projectdir, {
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
+    });
+
+    expect(actual[".projenrc.ts"]).toContain(
+      "javascript.NodePackageManager.NPM"
+    );
+  });
+});
+
+test("projen new --from external can use array option", () => {
+  withProjectDir((projectdir) => {
+    // execute `projen new --from @pepperize/projen-awscdk-app-ts@0.0.333` in the project directory
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@0.0.333",
+      "--no-post",
+      "--deps",
+      "glob@8",
+      "--deps",
+      "lodash@4",
+    ]);
+
+    // compare generated snapshot
+    const actual = directorySnapshot(projectdir, {
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
+    });
+
+    expect(actual[".projenrc.ts"]).toContain('deps: ["glob@8","lodash@4"]');
+  });
+});
+
+test("projen new --from external tarball", () => {
+  withProjectDir((projectdir) => {
     const shell = (command: string) => execSync(command, { cwd: projectdir });
-    // downloads cdk-appsync-project-1.1.3.tgz
-    shell('npm pack cdk-appsync-project@1.1.3');
+    // downloads pepperize-projen-awscdk-app-ts-0.0.333.tgz
+    shell("npm pack @pepperize/projen-awscdk-app-ts@0.0.333");
 
-    execProjenCLI(projectdir, ['new', '--from', './cdk-appsync-project-1.1.3.tgz', '--no-post', MIN_NODE_VERSION_OPTION]);
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "./pepperize-projen-awscdk-app-ts-0.0.333.tgz",
+      "--no-post",
+    ]);
 
     // patch the projen version in package.json to match the current version
     // otherwise, every bump would need to update these snapshots.
     sanitizeOutput(projectdir);
 
-    // compare generated .projenrc.js to the snapshot
+    // compare generated to the snapshot
     const actual = directorySnapshot(projectdir, {
-      excludeGlobs: [
-        '.git/**',
-        '.github/**',
-        'node_modules/**',
-        'yarn.lock',
-      ],
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
     });
 
-    expect(actual['package.json']).toMatchSnapshot();
-    expect(actual['.projenrc.js']).toMatchSnapshot();
-    expect(actual['schema.graphql']).toBeDefined();
+    expect(actual["package.json"]).toBeDefined();
+    expect(actual["package.json"]).toMatchSnapshot();
+    expect(actual[".projenrc.ts"]).toBeDefined();
+    expect(actual[".projenrc.ts"]).toMatchSnapshot();
   });
 });
 
-test('projen new --from external dist tag', () => {
-  withProjectDir(projectdir => {
-    execProjenCLI(projectdir, ['new', '--from', 'cdk-appsync-project@latest', '--no-post', MIN_NODE_VERSION_OPTION]);
+test("projen new --from external dist tag", () => {
+  withProjectDir((projectdir) => {
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@latest",
+      "--no-post",
+    ]);
 
-    // compare generated .projenrc.js to the snapshot
+    // compare generated to the snapshot
     const actual = directorySnapshot(projectdir, {
-      excludeGlobs: [
-        '.git/**',
-        '.github/**',
-        'node_modules/**',
-        'yarn.lock',
-      ],
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
     });
 
     // Not doing a snapshot test because @latest is used
-    expect(actual['schema.graphql']).toBeDefined();
+    expect(actual[".projenrc.ts"]).toBeDefined();
   });
 });
 
-test('options are not overwritten when creating from external project types', () => {
-  withProjectDir(projectdir => {
+test("projen new --from can use pjid that is similar to a built-in one", () => {
+  withProjectDir((projectdir) => {
+    try {
+      execProjenCLI(projectdir, [
+        "new",
+        "--from",
+        "cdklabs-projen-project-types@0.1.48",
+        "jsi", // almost jsii on purpose
+        "--no-post",
+      ]);
+    } catch (error: any) {
+      // expect an error since this project type doesn't exist in the package
+      // however it is important that the project type is passed to the package
+      expect(error.message).toContain('Project type "jsi" not found');
+    }
+  });
+});
 
-    // execute `projen new --from cdk-appsync-project` in the project directory
-    execProjenCLI(projectdir, ['new', '--from', 'cdk-appsync-project@1.1.3', '--no-synth', '--cdk-version', '1.63.0', MIN_NODE_VERSION_OPTION]);
+test("options are not overwritten when creating from external project types", () => {
+  withProjectDir((projectdir) => {
+    // execute `projen new --from @pepperize/projen-awscdk-app-ts@0.0.333` in the project directory
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@0.0.333",
+      "--no-synth",
+      "--cdk-version",
+      "2.50.0",
+    ]);
 
-    // compare generated .projenrc.js to the snapshot
+    // compare generated to the snapshot
     const actual = directorySnapshot(projectdir, {
-      excludeGlobs: [
-        '.git/**',
-        '.github/**',
-        'node_modules/**',
-        'yarn.lock',
-      ],
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
     });
 
-    expect(actual['.projenrc.js']).toContain('cdkVersion: \'1.63.0\'');
+    expect(actual[".projenrc.ts"]).toContain('cdkVersion: "2.50.0"');
   });
 });
 
-test('can choose from one of multiple external project types', () => {
-  withProjectDir(projectdir => {
+test("projen new --from will fail when a required option without a default is not provided", () => {
+  withProjectDir((projectdir) => {
+    try {
+      execProjenCLI(projectdir, [
+        "new",
+        "--from",
+        "mrpj@0.0.1",
+        "projen",
+        "--no-synth",
+      ]);
+    } catch (error: any) {
+      expect(error.message).toMatch('Cannot create "mrpj.ProjenProject"');
+      expect(error.message).toMatch("Missing required option:");
+      expect(error.message).toMatch("--repo [string]");
+    }
+  });
+});
 
-    // execute `projen new --from cdk-appsync-project` in the project directory
-    execProjenCLI(projectdir, ['new', '--from', '@taimos/projen@0.0.126', 'taimos-ts-lib', '--no-post', MIN_NODE_VERSION_OPTION]);
+test("projen new --from does not fail when save=false in npm config", () => {
+  withProjectDir((projectdir) => {
+    // Tells Node to not save packages on install. However we must save the external package to determine its name.
+    writeFileSync(join(projectdir, ".npmrc"), "save=false\n");
 
-    // patch the projen version in package.json to match the current version
-    // otherwise, every bump would need to update these snapshots.
-    sanitizeOutput(projectdir);
+    // execute `projen new --from @pepperize/projen-awscdk-app-ts@0.0.333` in the project directory
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@0.0.333",
+      "--no-post",
+      "--no-synth",
+      "--no-git",
+    ]);
 
-    // compare generated .projenrc.js to the snapshot
+    // Load the package.json
+    const packageJson = JSON.parse(
+      readFileSync(join(projectdir, "package.json"), "utf-8")
+    );
+    const packageName = Object.keys(packageJson.devDependencies).find(
+      (name) => name !== "projen"
+    );
+
+    expect(packageName).toBe("@pepperize/projen-awscdk-app-ts");
+  });
+});
+
+test("can choose from one of multiple external project types", () => {
+  withProjectDir((projectdir) => {
+    // execute `projen new --from @taimos/projen@0.0.187 taimos-ts-lib` in the project directory
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@taimos/projen@0.0.187",
+      "taimos-ts-lib",
+      "--no-post",
+    ]);
+
+    // compare generated to the snapshot
     const actual = directorySnapshot(projectdir, {
-      excludeGlobs: [
-        '.git/**',
-        '.github/**',
-        'node_modules/**',
-        'yarn.lock',
-      ],
+      excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
     });
 
-    expect(actual['.projenrc.js']).toContain('@taimos/projen@0.0.126');
+    expect(actual[".projenrc.ts"]).toContain("@taimos/projen@0.0.187");
   });
 });
-
-**/
 
 test("projen new --no-comments", () => {
   withProjectDir((projectdir) => {
@@ -185,6 +293,18 @@ test("projen new with unknown option works", () => {
     const projenrc = directorySnapshot(projectdir)[".projenrc.js"];
     expect(projenrc).toBeDefined();
     expect(projenrc).toMatchSnapshot();
+  });
+});
+
+test("projen new without any arguments displays full help", () => {
+  withProjectDir((projectdir) => {
+    try {
+      execProjenCLI(projectdir, ["new"]);
+    } catch (error: any) {
+      expect(error.message).toMatch("Creates a new projen project");
+      expect(error.message).toMatch("Commands:");
+      expect(error.message).toMatch("Multi-language jsii library project.");
+    }
   });
 });
 
@@ -247,27 +367,30 @@ test("projenrc-json creates node-project", () => {
 
 test("projenrc-json creates java project", () => {
   withProjectDir((projectdir) => {
-    execProjenCLI(projectdir, ["new", "java", "--projenrc-json"]);
+    execProjenCLI(projectdir, ["new", "java", "--projenrc-json", "--no-synth"]);
 
     expect(directorySnapshot(projectdir)).toMatchSnapshot();
   });
 });
 
-/**
- * commented out due to breaking changes in projen@0.37.0
-
-test('projenrc-json creates external project type', () => {
-  withProjectDir(projectdir => {
-    execProjenCLI(projectdir, ['new', '--from', 'cdk-appsync-project@1.1.3', '--cdk-version', '1.63.0', '--projenrc-json', '--no-synth', MIN_NODE_VERSION_OPTION]);
+test("projenrc-json creates external project type", () => {
+  withProjectDir((projectdir) => {
+    execProjenCLI(projectdir, [
+      "new",
+      "--from",
+      "@pepperize/projen-awscdk-app-ts@0.0.333",
+      "--projenrc-json",
+      "--no-synth",
+    ]);
 
     // exclude node_modules to work around bug where node_modules is generated AND one of the
     // dependencies includes a file with .json extension that isn't valid JSON
-    const projenrc = directorySnapshot(projectdir, { excludeGlobs: ['node_modules/**'] })['.projenrc.json'];
+    const projenrc = directorySnapshot(projectdir, {
+      excludeGlobs: ["node_modules/**"],
+    })[".projenrc.json"];
     expect(projenrc).toMatchSnapshot();
   });
 });
-
-*/
 
 test("projenrc-ts creates typescript projenrc", () => {
   withProjectDir((projectdir) => {
@@ -278,6 +401,7 @@ test("projenrc-ts creates typescript projenrc", () => {
       "--no-synth",
     ]);
     const projenrc = directorySnapshot(projectdir)[".projenrc.ts"];
+    expect(projenrc).toBeDefined();
     expect(projenrc).toMatchSnapshot();
   });
 });
@@ -301,42 +425,158 @@ test("python project can include .projenrc.js", () => {
   });
 });
 
-// test("projen new node --outdir path/to/mydir", () => {
-//   withProjectDir((projectdir) => {
-//     // GIVEN
-//     const shell = (command: string) => execSync(command, { cwd: projectdir });
-//     shell(`mkdir -p ${join("path", "to", "mydir")}`);
+test("python project can include .projenrc.ts", () => {
+  withProjectDir((projectdir) => {
+    execProjenCLI(projectdir, ["new", "python", "--projenrc-ts", "--no-synth"]);
 
-//     // WHEN
-//     execProjenCLI(projectdir, ["new", "node", "--outdir", "path/to/mydir"]);
+    const output = directorySnapshot(projectdir);
+    expect(output[".projenrc.py"]).toBeUndefined();
+    expect(output[".projenrc.js"]).toBeUndefined();
+    expect(output[".projenrc.ts"]).toBeDefined();
+    expect(output[".projenrc.ts"]).toContain('import { python } from "projen"');
+  });
+});
 
-//     // THEN
-//     const targetDirSnapshot = directorySnapshot(
-//       join(projectdir, "path", "to", "mydir"),
-//       { excludeGlobs: ["node_modules/**"] }
-//     );
-//     expect(targetDirSnapshot[".projenrc.js"]).toMatchSnapshot();
-//     expect(targetDirSnapshot["package.json"]).toBeDefined();
-//   });
-// });
+test("python project can define an array option", () => {
+  withProjectDir((projectdir) => {
+    execProjenCLI(projectdir, [
+      "new",
+      "python",
+      "--no-synth",
+      "--deps",
+      "python@^3.9",
+    ]);
+
+    const output = directorySnapshot(projectdir);
+    expect(output[".projenrc.py"]).toBeDefined();
+    expect(output[".projenrc.py"]).toMatchInlineSnapshot(`
+      "from projen.python import PythonProject
+
+      project = PythonProject(
+          author_email="my@user.email.com",
+          author_name="My User Name",
+          deps=["python@^3.9"],
+          module_name="my_project",
+          name="my-project",
+          version="0.1.0",
+      )
+
+      project.synth()"
+    `);
+  });
+});
+
+test("projen new node --outdir path/to/mydir", () => {
+  withProjectDir((projectdir) => {
+    // GIVEN
+    const shell = (command: string) => execSync(command, { cwd: projectdir });
+    shell(`mkdir -p ${join("path", "to", "mydir")}`);
+
+    // WHEN
+    execProjenCLI(projectdir, [
+      "new",
+      "node",
+      "--outdir",
+      "path/to/mydir",
+      "--no-post",
+    ]);
+
+    // THEN
+    const targetDirSnapshot = directorySnapshot(
+      join(projectdir, "path", "to", "mydir"),
+      { excludeGlobs: ["node_modules/**"] }
+    );
+    expect(targetDirSnapshot[".projenrc.js"]).toMatchSnapshot();
+    expect(targetDirSnapshot["package.json"]).toBeDefined();
+  });
+});
+
+test("can create external project in directory path containing a space", () => {
+  const pathWithSpace = join(mkdtemp(), "path with space");
+  mkdirSync(pathWithSpace, { recursive: true });
+
+  withProjectDir(
+    (projectdir) => {
+      execProjenCLI(projectdir, [
+        "new",
+        "--from",
+        "@pepperize/projen-awscdk-app-ts@latest",
+        "--no-post",
+      ]);
+      const actual = directorySnapshot(projectdir, {
+        excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
+      });
+      expect(actual[".projenrc.ts"]).toBeDefined();
+    },
+    {
+      chdir: true,
+      tmpdir: pathWithSpace,
+    }
+  );
+});
+
+describe("initial values", () => {
+  test("cli can override initial values", () => {
+    withProjectDir((projectdir) => {
+      execProjenCLI(projectdir, [
+        "new",
+        "typescript",
+        "--projenrc-ts",
+        "false",
+        "--no-post",
+      ]);
+      const actual = directorySnapshot(projectdir, {
+        excludeGlobs: [".git/**", ".github/**", "node_modules/**", "yarn.lock"],
+      });
+      expect(actual[".projenrc.js"]).toBeDefined();
+      expect(actual[".projenrc.ts"]).not.toBeDefined();
+    });
+  });
+});
 
 describe("git", () => {
   test("--git (default) will initialize a git repo and create a commit", () => {
-    withProjectDir((projectdir) => {
-      execProjenCLI(projectdir, ["new", "project"]);
-      expect(
-        execCapture("git log", { cwd: projectdir })
-          .toString("utf8")
-          .includes("chore: project created with projen")
-      ).toBeTruthy();
-    });
+    withProjectDir(
+      (projectdir) => {
+        execProjenCLI(projectdir, ["new", "project"]);
+        expect(
+          execCapture("git log", { cwd: projectdir })
+            .toString("utf8")
+            .includes("chore: project created with projen")
+        ).toBeTruthy();
+      },
+      { git: false }
+    );
+  });
+
+  test("--git (default) respects init.defaultBranch setting", () => {
+    withProjectDir(
+      (projectdir) => {
+        const defaultBranch = "test-default-branch";
+
+        process.env.XDG_CONFIG_HOME = projectdir;
+        mkdirSync(join(projectdir, "git"));
+        writeFileSync(join(projectdir, "git", "config"), "");
+        execCapture(`git config --global init.defaultBranch ${defaultBranch}`, {
+          cwd: projectdir,
+        });
+
+        execProjenCLI(projectdir, ["new", "project"]);
+        expect(
+          execCapture("git rev-parse --abbrev-ref HEAD", {
+            cwd: projectdir,
+          }).toString()
+        ).toContain(defaultBranch);
+      },
+      { git: false }
+    );
   });
 
   test("--no-git will not create a git repo", () => {
     withProjectDir(
       (projectdir) => {
         execProjenCLI(projectdir, ["new", "project", "--no-git"]);
-        expect(pathExistsSync(join(projectdir, ".git"))).toBeFalsy();
+        expect(existsSync(join(projectdir, ".git"))).toBeFalsy();
       },
       { git: false }
     );

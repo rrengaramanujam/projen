@@ -1,9 +1,9 @@
-import { join } from "path";
+import * as path from "path";
+import { renderBundleName } from "./util";
 import { Component } from "../component";
 import { DependencyType } from "../dependencies";
 import { Project } from "../project";
 import { Task } from "../task";
-import { renderBundleName } from "./util";
 
 /**
  * Options for `Bundler`.
@@ -110,8 +110,8 @@ export class Bundler extends Component {
   public addBundle(entrypoint: string, options: AddBundleOptions): Bundle {
     const name = renderBundleName(entrypoint);
 
-    const outdir = join(this.bundledir, name);
-    const outfile = join(outdir, options.outfile ?? "index.js");
+    const outdir = path.posix.join(this.bundledir, name);
+    const outfile = path.posix.join(outdir, options.outfile ?? "index.js");
     const args = [
       "esbuild",
       "--bundle",

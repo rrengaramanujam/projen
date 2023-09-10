@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
-import { readJsonSync } from "fs-extra";
-import semver from "semver";
+import { dirname, join } from "path";
+import * as semver from "semver";
 import * as YAML from "yaml";
 import { Project, DependencyType } from "../../src";
 import {
@@ -9,7 +8,7 @@ import {
   NodePackageManager,
 } from "../../src/javascript/node-package";
 import { minVersion } from "../../src/javascript/util";
-import * as util from "../../src/util";
+import { TaskRuntime } from "../../src/task-runtime";
 import { mkdtemp, synthSnapshot, TestProject } from "../util";
 
 /**
@@ -19,12 +18,19 @@ import { mkdtemp, synthSnapshot, TestProject } from "../util";
  * NOT A PERFECT MODEL OF YARN. JUST CLOSE ENOUGH.
  * @param outdir Test project's outdir, where package.json and node_modules live
  * @param latestPackages Package name and version to "install" for "*" deps
+ * @param hooks Optional record by package name of hooks to execute on mock "install". Should return manifest.
  */
 function mockYarnInstall(
   outdir: string,
-  latestPackages: Record<string, string>
+  latestPackages: Record<string, string>,
+  hooks?: Record<
+    string,
+    (manifest: Record<string, any>, manifestPath: string) => Record<string, any>
+  >
 ) {
-  const pkgJson = readJsonSync(join(outdir, "package.json"));
+  const pkgJson = JSON.parse(
+    readFileSync(join(outdir, "package.json"), "utf-8")
+  );
   const yarnLock: Record<string, string> = {};
   const depRanges: Record<string, string[]> = {};
   const depVersions: Record<string, string[]> = {};
@@ -88,12 +94,19 @@ function mockYarnInstall(
       throw new Error(`No version given satisfies all constraints on ${dep}`);
     }
     mkdirSync(join(outdir, `node_modules/${dep}`), { recursive: true });
+    const manifestHook = hooks?.[dep] ?? ((manifest) => manifest);
+    const manifestPath = join(outdir, `node_modules/${dep}/package.json`);
     writeFileSync(
-      join(outdir, `node_modules/${dep}/package.json`),
-      JSON.stringify({
-        name: `${dep}`,
-        version: `${installVersion}`,
-      })
+      manifestPath,
+      JSON.stringify(
+        manifestHook(
+          {
+            name: `${dep}`,
+            version: `${installVersion}`,
+          },
+          manifestPath
+        )
+      )
     );
     // Not accurate to yaml.lock v1 format, but close enough.
     yarnLock[
@@ -153,11 +166,11 @@ test("single bugs field present", () => {
 });
 
 test('lockfile updated (install twice) after "*"s are resolved', () => {
-  const execMock = jest
-    .spyOn(util, "exec")
-    .mockImplementation((command, options) => {
-      expect(command.startsWith("yarn install")).toBeTruthy();
-      mockYarnInstall(options.cwd, { ms: "2.1.3" });
+  const taskMock = jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "2.1.3" });
     });
 
   const project = new Project({ name: "test" });
@@ -171,11 +184,13 @@ test('lockfile updated (install twice) after "*"s are resolved', () => {
   const yarnLock: string | undefined = readFileSync(yarnLockPath, "utf8");
 
   expect(yarnLock).toStrictEqual('"ms@^2.1.3": version "2.1.3"\n');
-  expect(execMock).toBeCalledTimes(2);
+  expect(taskMock).toBeCalledTimes(2);
 });
 
 test("install only once if all versions are resolved", () => {
-  const execMock = jest.spyOn(util, "exec").mockReturnValueOnce();
+  const taskMock = jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockReturnValueOnce();
   const project = new Project({ name: "test" });
   const pkg = new NodePackage(project);
 
@@ -183,11 +198,13 @@ test("install only once if all versions are resolved", () => {
 
   project.synth();
 
-  expect(execMock).toBeCalledTimes(1);
+  expect(taskMock).toBeCalledTimes(1);
 });
 
 test("no install if package.json did not change at all", () => {
-  const execMock = jest.spyOn(util, "exec").mockReturnValueOnce();
+  const taskMock = jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockReturnValueOnce();
   const outdir = mkdtemp({ cleanup: false });
 
   const orig = {
@@ -224,17 +241,19 @@ test("no install if package.json did not change at all", () => {
   pkg.addDeps("ms@^2");
 
   project.synth();
-  expect(execMock).not.toBeCalled();
+  expect(taskMock).not.toBeCalled();
 });
 
 test('"*" peer dependencies are pinned in devDependencies', () => {
   // Post-synth dependency version resolution uses installed package from node_modules folder
   // Mock install command to add this folder with a fixed dependency version,
   // mimicking yarn installing the latest package for "*"
-  jest.spyOn(util, "exec").mockImplementation((command, options) => {
-    expect(command.startsWith("yarn install")).toBeTruthy();
-    mockYarnInstall(options.cwd, { ms: "1.2.3" });
-  });
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "1.2.3" });
+    });
 
   const project = new Project({ name: "test" });
   const pkg = new NodePackage(project, {
@@ -247,7 +266,9 @@ test('"*" peer dependencies are pinned in devDependencies', () => {
 
   project.synth();
 
-  const pkgFile = readJsonSync(join(project.outdir, "package.json"));
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
 
   expect(pkgFile.peerDependencies).toStrictEqual({ ms: "^1.2.3" });
   expect(pkgFile.devDependencies).toStrictEqual({ ms: "1.2.3" });
@@ -257,10 +278,12 @@ test("manually set devDependencies are not changed when a peerDependency is adde
   // Post-synth dependency version resolution uses installed package from node_modules folder
   // Mock install command to add this folder with a fixed dependency version,
   // mimicking yarn installing the latest package for "*"
-  jest.spyOn(util, "exec").mockImplementation((command, options) => {
-    expect(command.startsWith("yarn install")).toBeTruthy();
-    mockYarnInstall(options.cwd, { ms: "1.3.4" });
-  });
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "1.3.4" });
+    });
 
   const project = new Project({ name: "test" });
   const pkg = new NodePackage(project, {
@@ -289,7 +312,9 @@ test("manually set devDependencies are not changed when a peerDependency is adde
 
   project.synth();
 
-  const pkgFile = readJsonSync(join(project.outdir, "package.json"));
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
 
   expect(pkgFile.peerDependencies).toStrictEqual({ ms: "^1.3.4" });
   expect(pkgFile.devDependencies).toStrictEqual({ ms: "^1.3.0" });
@@ -299,10 +324,12 @@ test("devDependencies are not pinned by peerDependencies if a regular (runtime) 
   // Post-synth dependency version resolution uses installed package from node_modules folder
   // Mock install command to add this folder with a fixed dependency version,
   // mimicking yarn installing the latest package for "*"
-  jest.spyOn(util, "exec").mockImplementation((command, options) => {
-    expect(command.startsWith("yarn install")).toBeTruthy();
-    mockYarnInstall(options.cwd, { ms: "1.3.8" });
-  });
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "1.3.8" });
+    });
 
   const project = new Project({ name: "test" });
   const pkg = new NodePackage(project, {
@@ -316,7 +343,9 @@ test("devDependencies are not pinned by peerDependencies if a regular (runtime) 
 
   project.synth();
 
-  const pkgFile = readJsonSync(join(project.outdir, "package.json"));
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
 
   expect(pkgFile.peerDependencies).toStrictEqual({ ms: "^1.3.8" });
   expect(pkgFile.dependencies).toStrictEqual({ ms: "^1.3.8" });
@@ -327,10 +356,12 @@ test("devDependencies are not pinned by peerDependencies if pinnedDevDependency 
   // Post-synth dependency version resolution uses installed package from node_modules folder
   // Mock install command to add this folder with a fixed dependency version,
   // mimicking yarn installing the latest package for "*"
-  jest.spyOn(util, "exec").mockImplementation((command, options) => {
-    expect(command.startsWith("yarn install")).toBeTruthy();
-    mockYarnInstall(options.cwd, { ms: "1.4.0" });
-  });
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "1.4.0" });
+    });
 
   const project = new Project({ name: "test" });
   const pkg = new NodePackage(project, {
@@ -343,7 +374,9 @@ test("devDependencies are not pinned by peerDependencies if pinnedDevDependency 
 
   project.synth();
 
-  const pkgFile = readJsonSync(join(project.outdir, "package.json"));
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
 
   expect(pkgFile.peerDependencies).toStrictEqual({ ms: "^1.4.0" });
   expect(pkgFile.devDependencies).toBeUndefined();
@@ -353,10 +386,12 @@ test("file path dependencies are respected", () => {
   // Post-synth dependency version resolution uses installed package from node_modules folder
   // Mock install command to add this folder with a fixed dependency version,
   // mimicking yarn installing the latest package for "*"
-  jest.spyOn(util, "exec").mockImplementation((command, options) => {
-    expect(command.startsWith("yarn install")).toBeTruthy();
-    mockYarnInstall(options.cwd, { ms: "file:../ms" });
-  });
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "file:../ms" });
+    });
 
   const project = new Project({ name: "test" });
   const pkg = new NodePackage(project, {
@@ -369,19 +404,27 @@ test("file path dependencies are respected", () => {
 
   project.synth();
 
-  const pkgFile = readJsonSync(join(project.outdir, "package.json"));
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
 
   expect(pkgFile.peerDependencies).toStrictEqual({ ms: "file:../ms" });
   expect(pkgFile.devDependencies).toBeUndefined();
 });
 
 test("local dependencies can be specified using 'file:' prefix", () => {
-  jest.spyOn(util, "exec");
   const localDepPath = mkdtemp({ cleanup: false });
   const localPackage = {
     name: "local-dep",
     version: "0.0.0",
   };
+
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: `file:${localDepPath}` });
+    });
 
   writeFileSync(
     join(localDepPath, "package.json"),
@@ -394,31 +437,37 @@ test("local dependencies can be specified using 'file:' prefix", () => {
 
   project.synth();
 
-  const pkgFile = readJsonSync(join(project.outdir, "package.json"));
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
 
   expect(pkgFile.peerDependencies).toStrictEqual({ "local-dep": localDepPath });
 });
 
-test("yarn resolutions", () => {
-  const project = new TestProject();
+[NodePackageManager.YARN, NodePackageManager.YARN2].forEach(
+  (packageManager) => {
+    test(`${packageManager} resolutions`, () => {
+      const project = new TestProject();
 
-  const pkg = new NodePackage(project, {
-    packageManager: NodePackageManager.YARN,
-  });
+      const pkg = new NodePackage(project, {
+        packageManager,
+      });
 
-  pkg.addPackageResolutions("some-dep@1.0.0", "other-dep");
+      pkg.addPackageResolutions("some-dep@1.0.0", "other-dep");
 
-  expect(
-    project.deps.all.filter((dep) => dep.type === DependencyType.OVERRIDE)
-  ).toEqual([
-    { name: "other-dep", type: "override" },
-    { name: "some-dep", type: "override", version: "1.0.0" },
-  ]);
-  const snps = synthSnapshot(project);
+      expect(
+        project.deps.all.filter((dep) => dep.type === DependencyType.OVERRIDE)
+      ).toEqual([
+        { name: "other-dep", type: "override" },
+        { name: "some-dep", type: "override", version: "1.0.0" },
+      ]);
+      const snps = synthSnapshot(project);
 
-  expect(snps["package.json"].resolutions).toBeDefined();
-  expect(snps["package.json"]).toMatchSnapshot();
-});
+      expect(snps["package.json"].resolutions).toBeDefined();
+      expect(snps["package.json"]).toMatchSnapshot();
+    });
+  }
+);
 
 test("npm overrides", () => {
   const project = new TestProject();
@@ -441,6 +490,24 @@ test("npm overrides", () => {
   expect(snps["package.json"]).toMatchSnapshot();
 });
 
+test("removed override dependency will not be rendered in overrides", () => {
+  const project = new TestProject();
+
+  const pkg = new NodePackage(project, {
+    packageManager: NodePackageManager.NPM,
+  });
+
+  pkg.addDeps("some-dep@1.0.0");
+  pkg.addPackageResolutions("some-dep@1.0.0", "other-dep@another-dep@1.2.3");
+  project.deps.removeDependency("some-dep", DependencyType.OVERRIDE);
+
+  const snps = synthSnapshot(project);
+  const pkgJson = snps["package.json"];
+
+  expect(pkgJson).toHaveProperty("dependencies.some-dep", "1.0.0");
+  expect(pkgJson).not.toHaveProperty("overrides.some-dep");
+});
+
 test("pnpm overrides", () => {
   const project = new TestProject();
 
@@ -460,4 +527,132 @@ test("pnpm overrides", () => {
 
   expect(snps["package.json"].pnpm.overrides).toBeDefined();
   expect(snps["package.json"]).toMatchSnapshot();
+});
+
+test("typesVersions is not managed by projen, but can be manipulated", () => {
+  // ARRANGE
+  const outdir = mkdtemp();
+  const orig = {
+    name: "test",
+    main: "lib/index.js",
+    license: "Apache-2.0",
+    version: "0.0.0",
+    typesVersions: { "<=3.9": { "*": ["ts3.9/*"] } },
+    "//": '~~ Generated by projen. To modify, edit .projenrc.js and run "npx projen".',
+  };
+
+  writeFileSync(
+    join(outdir, "package.json"),
+    JSON.stringify(orig, undefined, 2)
+  );
+
+  // ACT
+  const project = new Project({ name: "test", outdir });
+  const pkg = new NodePackage(project);
+  pkg.file.addOverride("typesVersions.>=4\\.0", { "*": ["ts4.0/*"] });
+
+  project.synth();
+
+  // ASSERT
+  const pkgFile = JSON.parse(
+    readFileSync(join(project.outdir, "package.json"), "utf-8")
+  );
+
+  expect(pkgFile.typesVersions).toStrictEqual({
+    "<=3.9": { "*": ["ts3.9/*"] },
+    ">=4.0": { "*": ["ts4.0/*"] },
+  });
+});
+
+test("tryResolveDependencyVersion", () => {
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(this.workdir, { ms: "2.1.3" });
+    });
+  const outdir = mkdtemp();
+  const project = new TestProject({ outdir });
+
+  const pkg = new NodePackage(project);
+  pkg.addDeps("typescript@5.0.0", "ms@*");
+  project.synth();
+
+  expect(pkg.tryResolveDependencyVersion("typescript")).toEqual("5.0.0");
+  expect(project.deps.tryGetDependency("ms")?.version).toEqual("*");
+  expect(pkg.tryResolveDependencyVersion("ms")).toEqual("2.1.3");
+  expect(pkg.tryResolveDependencyVersion("foo")).toEqual(undefined);
+});
+
+test("tryResolveDependencyVersion resolves with custom package exports.", () => {
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(
+        this.workdir,
+        { rollup: "3.21.1" },
+        {
+          rollup: (manifest, manifestPath) => {
+            // create default entrypoint so node is able to resolve it.
+            const entrypoint = join(dirname(manifestPath), "dist", "rollup.js");
+            mkdirSync(dirname(entrypoint), { recursive: true });
+            writeFileSync(entrypoint, "");
+            return {
+              ...manifest,
+              exports: {
+                ".": {
+                  require: "./dist/rollup.js",
+                },
+              },
+            };
+          },
+        }
+      );
+    });
+  const outdir = mkdtemp();
+  const project = new TestProject({ outdir });
+
+  const pkg = new NodePackage(project);
+  pkg.addDeps("rollup@*");
+  project.synth();
+
+  expect(project.deps.tryGetDependency("rollup")?.version).toEqual("*");
+  expect(pkg.tryResolveDependencyVersion("rollup")).toEqual("3.21.1");
+});
+
+test("tryResolveDependencyVersion resolves with no package.json or default export with default conditions.", () => {
+  jest
+    .spyOn(TaskRuntime.prototype, "runTask")
+    .mockImplementation(function (this: TaskRuntime, command) {
+      expect(command).toMatch("install");
+      mockYarnInstall(
+        this.workdir,
+        { "@types/js-yaml": "4.0.5" },
+        {
+          "@types/js-yaml": (manifest) => {
+            return {
+              ...manifest,
+              exports: {
+                ".": {
+                  types: {
+                    import: "./index.d.mts",
+                    default: "./index.d.ts",
+                  },
+                },
+              },
+            };
+          },
+        }
+      );
+    });
+  const outdir = mkdtemp();
+  const project = new TestProject({ outdir });
+
+  const pkg = new NodePackage(project);
+  pkg.addDeps("@types/js-yaml@*");
+  project.synth();
+
+  expect(project.deps.tryGetDependency("@types/js-yaml")?.version).toEqual("*");
+  expect(pkg.tryResolveDependencyVersion("@types/js-yaml")).toEqual("4.0.5");
 });

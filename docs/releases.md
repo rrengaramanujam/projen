@@ -27,6 +27,17 @@ majorVersion: 1
 For major versions 1 and above, if a release includes `fix` commits *only*, it will increase the *patch* version.
 If a release includes any `feat` commits, then the new version will be a *minor* version.
 
+## Prerelease Versions
+
+To release prerelease versions from the main branch, set the `prerelease` option to the desired prerelease prefix.
+For example:
+
+```js
+prerelease: 'beta'
+```
+
+You can also use this with release branches or manual releases (see example below).
+
 ## Breaking Changes
 
 Conventional Commits allows changes to be marked as breaking by appending a `!` after the type/scope in the commit message or adding a `BREAKING CHANGE:` footer ([see examples](https://www.conventionalcommits.org/en/v1.0.0/#examples)).
@@ -47,16 +58,22 @@ In the initial development phase of major version zero, breaking changes will ne
 You can release multiple major versions from different branches at the same time through the `releaseBranches` option.
 A separate workflow will be created for each release branch to publish the commits to this branch.
 
-Each release branch must be associated with a different major version.
+Each release branch must be associated with a different version. 
+
+Normally it is sufficient to specify only `majorVersion`. If fixes to an earlier minor version should be released, `minorVersion` can also be specified.
 
 ```js
 releaseBranches: {
+  '2.0': {
+    majorVersion: 2,
+    minorVersion: 0,
+  },
   '2.x': {
     majorVersion: 2,
   },
   '3.x': {
     majorVersion: 3,
-    prerelease: true,
+    prerelease: 'beta',
   },
 }
 ```
@@ -69,6 +86,25 @@ changelogs.
 
 ```js
 releaseTrigger: ReleaseTrigger.scheduled({ schedule: '0 17 * * *' }),
+```
+
+## Selective Releases
+
+It is possible to only bump the version on a subset of commits.
+For example you could only release a new version for every feature and fix that was added to the repo.
+
+```js
+releasableCommits: ReleasableCommits.featuresAndFixes(),
+```
+
+This check only runs according to the release trigger, but serves as an additional check to not create unnecessary releases.
+
+A custom check can be implemented `ReleasableCommits.exec()`.
+This command should return a list of commit hashes that are considered releasable.
+I.e. to not not bump the version, the command must print nothing and exit successfully.
+
+```js
+releasableCommits: ReleasableCommits.exec("./custom-script.sh"),
 ```
 
 ## Manual Releases
@@ -130,6 +166,8 @@ releaseTagPrefix: 'stable/'
 Please note that this also changes the behavior of finding existing tags and projen will now be looking for tags like `stable/1.2.3` to determine the current version.
 If you are migrating to a new tag format, make sure to re-tag at least the current version with the new format.
 
+The default prefix for release tags is `v*`. So if `releaseTagPrefix` is not defined in your `.projenrc.js` configuration you must define your tags as `v1.0.0`, `v2.0.0.0` and so on.
+
 ### Why is the version in `package.json` set to `0.0.0`?
 
 Projen uses tags to keep track of the current version of the project.
@@ -140,3 +178,14 @@ To convey this message, the version in `package.json` is kept at `0.0.0`.
 Additionally, Node.js packages are often published directly by running `npm publish` in the root of the repository.
 This does not work in projen.
 Instead, projen requires you to run `projen release` to create releasable artifacts and manually publish these artifacts.
+
+### Can I do a manual one-off prerelease?
+
+If you wanted to generate a manual prerelease you can set the `PRERELEASE` environment variable.
+
+For example in a Node.js project, you might run:
+
+- `PRERELEASE=beta projen release` *(runs tests & builds a releasable artifact)*
+- `npm publish dist/js/my-package-1.2.3-beta.0.tgz`
+
+Make sure to also read the [Manual Releases](#manual-releases) section above.

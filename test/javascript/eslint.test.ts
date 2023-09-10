@@ -1,3 +1,4 @@
+import { TaskRuntime } from "../../src";
 import { Eslint, NodeProject } from "../../src/javascript";
 import { synthSnapshot } from "../util";
 
@@ -12,6 +13,7 @@ test("devdirs", () => {
   new Eslint(project, {
     devdirs: ["foo", "bar"],
     dirs: ["mysrc"],
+    lintProjenRc: false,
   });
 
   // THEN
@@ -30,6 +32,7 @@ describe("prettier", () => {
     new Eslint(project, {
       dirs: ["mysrc"],
       prettier: true,
+      lintProjenRc: false,
     });
 
     // THEN
@@ -47,6 +50,7 @@ describe("prettier", () => {
     new Eslint(project, {
       dirs: ["mysrc"],
       prettier: true,
+      lintProjenRc: false,
     });
 
     // THEN
@@ -73,6 +77,7 @@ describe("alias", () => {
         "@foo": "./src/foo",
       },
       aliasExtensions: [".ts", ".js"],
+      lintProjenRc: false,
     });
 
     // THEN
@@ -101,6 +106,7 @@ test("tsAlwaysTryTypes", () => {
   const eslint = new Eslint(project, {
     dirs: ["mysrc"],
     tsAlwaysTryTypes: true,
+    lintProjenRc: false,
   });
 
   // THEN
@@ -121,6 +127,7 @@ test("if the prettier is configured, eslint is configured accordingly", () => {
   // WHEN
   new Eslint(project, {
     dirs: ["src"],
+    lintProjenRc: false,
   });
 
   // THEN
@@ -142,6 +149,7 @@ test("can output yml instead of json", () => {
   new Eslint(project, {
     dirs: ["src"],
     yaml: true,
+    lintProjenRc: false,
   });
 
   // THEN
@@ -161,6 +169,7 @@ test("can override the parser", () => {
   // WHEN
   const eslint = new Eslint(project, {
     dirs: ["src"],
+    lintProjenRc: false,
   });
   eslint.addOverride({
     files: ["*.json", "*.json5", "*.jsonc"],
@@ -173,4 +182,23 @@ test("can override the parser", () => {
     files: ["*.json", "*.json5", "*.jsonc"],
     parser: "jsonc-eslint-parser",
   });
+});
+
+test("creates a eslint task", () => {
+  // GIVEN
+  const project = new NodeProject({
+    name: "test",
+    defaultReleaseBranch: "master",
+    prettier: true,
+  });
+
+  // WHEN
+  const eslint = new Eslint(project, {
+    dirs: ["src"],
+    lintProjenRc: false,
+  });
+
+  // THEN
+  const manifest = synthSnapshot(project)[TaskRuntime.MANIFEST_FILE];
+  expect(eslint.eslintTask._renderSpec()).toMatchObject(manifest.tasks.eslint);
 });

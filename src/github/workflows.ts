@@ -1,12 +1,12 @@
 import { snake } from "case";
+import { GitHubActionsProvider } from "./actions-provider";
+import { GitHub } from "./github";
+import { GithubCredentials } from "./github-credentials";
+import * as workflows from "./workflows-model";
 import { resolve } from "../_resolve";
 import { Component } from "../component";
 import { kebabCaseKeys } from "../util";
 import { YamlFile } from "../yaml";
-import { GitHub } from "./github";
-import { GithubCredentials } from "./github-credentials";
-
-import * as workflows from "./workflows-model";
 
 /**
  * Options for `GithubWorkflow`.
@@ -58,6 +58,20 @@ export class GithubWorkflow extends Component {
    */
   public readonly projenCredentials: GithubCredentials;
 
+  /**
+   * The name for workflow runs generated from the workflow. GitHub displays the
+   * workflow run name in the list of workflow runs on your repository's
+   * "Actions" tab. If `run-name` is omitted or is only whitespace, then the run
+   * name is set to event-specific information for the workflow run. For
+   * example, for a workflow triggered by a `push` or `pull_request` event, it
+   * is set as the commit message.
+   *
+   * This value can include expressions and can reference `github` and `inputs`
+   * contexts.
+   */
+  public runName?: string;
+
+  private actions: GitHubActionsProvider;
   private events: workflows.Triggers = {};
   private jobs: Record<
     string,
@@ -74,6 +88,7 @@ export class GithubWorkflow extends Component {
     this.name = name;
     this.concurrency = options.concurrency;
     this.projenCredentials = github.projenCredentials;
+    this.actions = github.actions;
 
     const workflowsEnabled = github.workflowsEnabled || options.force;
 
@@ -122,26 +137,7 @@ export class GithubWorkflow extends Component {
   public addJobs(
     jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
   ) {
-    // verify that job has a "permissions" statement to ensure workflow can
-    // operate in repos with default tokens set to readonly
-    for (const [id, job] of Object.entries(jobs)) {
-      if (!job.permissions) {
-        throw new Error(
-          `${id}: all workflow jobs must have a "permissions" clause to ensure workflow can operate in restricted repositories`
-        );
-      }
-    }
-
-    // verify that job has a "runsOn" statement to ensure a worker can be selected appropriately
-    for (const [id, job] of Object.entries(jobs)) {
-      if (!("uses" in job)) {
-        if ("runsOn" in job && job.runsOn.length === 0) {
-          throw new Error(
-            `${id}: at least one runner selector labels must be provided in "runsOn" to ensure a runner instance can be selected`
-          );
-        }
-      }
-    }
+    verifyJobConstraints(jobs);
 
     this.jobs = {
       ...this.jobs,
@@ -149,12 +145,70 @@ export class GithubWorkflow extends Component {
     };
   }
 
+  /**
+   * Get a single job from the workflow.
+   * @param id The job name (unique within the workflow)
+   */
+  public getJob(
+    id: string
+  ): workflows.Job | workflows.JobCallingReusableWorkflow {
+    return this.jobs[id];
+  }
+
+  /**
+   * Updates a single job to the workflow.
+   * @param id The job name (unique within the workflow)
+   */
+  public updateJob(
+    id: string,
+    job: workflows.Job | workflows.JobCallingReusableWorkflow
+  ) {
+    this.updateJobs({ [id]: job });
+  }
+
+  /**
+   * Updates jobs for this worklow
+   * Does a complete replace, it does not try to merge the jobs
+   *
+   * @param jobs Jobs to update.
+   */
+  public updateJobs(
+    jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
+  ) {
+    verifyJobConstraints(jobs);
+
+    const newJobIds = Object.keys(jobs);
+    const updatedJobs = Object.entries(this.jobs).map(([jobId, job]) => {
+      if (newJobIds.includes(jobId)) {
+        return [jobId, jobs[jobId]];
+      }
+      return [jobId, job];
+    });
+    this.jobs = {
+      ...Object.fromEntries(updatedJobs),
+    };
+  }
+
+  /**
+   * Removes a single job to the workflow.
+   * @param id The job name (unique within the workflow)
+   */
+  public removeJob(id: string) {
+    const updatedJobs = Object.entries(this.jobs).filter(
+      ([jobId]) => jobId !== id
+    );
+    this.jobs = {
+      ...Object.fromEntries(updatedJobs),
+    };
+  }
+
   private renderWorkflow() {
     return {
       name: this.name,
+      "run-name": this.runName,
       on: snakeCaseKeys(this.events),
       concurrency: this.concurrency,
-      jobs: renderJobs(this.jobs),
+      jobs: renderJobs(this.jobs, this.actions),
     };
   }
 }
@@ -179,7 +233,8 @@ function snakeCaseKeys<T = unknown>(obj: T): T {
 }
 
 function renderJobs(
-  jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
+  jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>,
+  actions: GitHubActionsProvider
 ) {
   const result: Record<string, unknown> = {};
   for (const [name, job] of Object.entries(jobs)) {
@@ -204,6 +259,7 @@ function renderJobs(
         uses: job.uses,
         with: job.with,
         secrets: job.secrets,
+        strategy: renderJobStrategy(job.strategy),
       };
     }
 
@@ -217,7 +273,7 @@ function renderJobs(
     return {
       name: job.name,
       needs: arrayOrScalar(job.needs),
-      "runs-on": arrayOrScalar(job.runsOn),
+      "runs-on": arrayOrScalar(job.runsOnGroup) ?? arrayOrScalar(job.runsOn),
       permissions: kebabCaseKeys(job.permissions),
       environment: job.environment,
       concurrency: job.concurrency,
@@ -281,7 +337,7 @@ function renderJobs(
       name: step.name,
       id: step.id,
       if: step.if,
-      uses: step.uses,
+      uses: step.uses && actions.get(step.uses),
       env: step.env,
       run: step.run,
       with: step.with,
@@ -292,7 +348,10 @@ function renderJobs(
   }
 }
 
-function arrayOrScalar<T>(arr: T[] | undefined): T | T[] | undefined {
+function arrayOrScalar<T>(arr: T | T[] | undefined): T | T[] | undefined {
+  if (!Array.isArray(arr)) {
+    return arr;
+  }
   if (arr == null || arr.length === 0) {
     return arr;
   }
@@ -300,13 +359,6 @@ function arrayOrScalar<T>(arr: T[] | undefined): T | T[] | undefined {
     return arr[0];
   }
   return arr;
-}
-
-export interface IJobProvider {
-  /**
-   * Generates a collection of named GitHub workflow jobs.
-   */
-  renderJobs(): Record<string, workflows.Job>;
 }
 
 function setupTools(tools: workflows.Tools) {
@@ -348,4 +400,18 @@ function setupTools(tools: workflows.Tools) {
   }
 
   return steps;
+}
+
+function verifyJobConstraints(
+  jobs: Record<string, workflows.Job | workflows.JobCallingReusableWorkflow>
+) {
+  // verify that job has a "permissions" statement to ensure workflow can
+  // operate in repos with default tokens set to readonly
+  for (const [id, job] of Object.entries(jobs)) {
+    if (!job.permissions) {
+      throw new Error(
+        `${id}: all workflow jobs must have a "permissions" clause to ensure workflow can operate in restricted repositories`
+      );
+    }
+  }
 }

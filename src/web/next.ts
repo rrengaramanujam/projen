@@ -1,3 +1,4 @@
+import { PostCss } from "./postcss";
 import { Component } from "../component";
 import {
   NodeProject,
@@ -8,7 +9,6 @@ import {
 import { SampleDir, SampleFile } from "../sample-file";
 import { TypeScriptAppProject, TypeScriptProjectOptions } from "../typescript";
 import { deepMerge } from "../util";
-import { PostCss } from "./postcss";
 
 export interface NextJsCommonProjectOptions {
   /**
@@ -77,7 +77,7 @@ export class NextJsProject extends NodeProject {
     super({
       jest: false,
       minNodeVersion: "12.22.0", // https://nextjs.org/docs#system-requirements
-      workflowNodeVersion: "14.x",
+      workflowNodeVersion: "16.x",
       ...options,
     });
 
@@ -128,7 +128,7 @@ export class NextJsTypeScriptProject extends TypeScriptAppProject {
       eslint: false,
       minNodeVersion: "12.22.0", // https://nextjs.org/docs#system-requirements
       jest: false,
-      workflowNodeVersion: "14.x",
+      workflowNodeVersion: "16.x",
       tsconfig: {
         include: ["**/*.ts", "**/*.tsx"],
         compilerOptions: {

@@ -1,3 +1,4 @@
+import { warn } from "./logging";
 import {
   TaskCommonOptions,
   TaskSpec,
@@ -24,6 +25,14 @@ export interface TaskOptions extends TaskCommonOptions {
    * @default false
    */
   readonly receiveArgs?: boolean;
+
+  /**
+   * Should the provided `exec` shell command receive fixed args.
+   * @see {@link TaskStepOptions.args}
+   *
+   * @default - no arguments are passed to the step
+   */
+  readonly args?: string[];
 }
 
 /**
@@ -36,12 +45,7 @@ export class Task {
    */
   public readonly name: string;
 
-  /**
-   * A command to execute which determines if the task should be skipped. If it
-   * returns a zero exit code, the task will not be executed.
-   */
-  public readonly condition?: string;
-
+  private readonly _conditions: string[];
   private readonly _steps: TaskStep[];
   private readonly _env: { [name: string]: string };
   private readonly cwd?: string;
@@ -52,11 +56,11 @@ export class Task {
   constructor(name: string, props: TaskOptions = {}) {
     this.name = name;
     this._description = props.description;
-    this.condition = props.condition;
+    this._conditions = props.condition ? [props.condition] : [];
     this.cwd = props.cwd;
     this._locked = false;
-
     this._env = props.env ?? {};
+
     this._steps = props.steps ?? [];
     this.requiredEnv = props.requiredEnv;
 
@@ -88,6 +92,28 @@ export class Task {
    */
   public set description(desc: string | undefined) {
     this._description = desc;
+  }
+
+  /**
+   * A command to execute which determines if the task should be skipped. If it
+   * returns a zero exit code, the task will not be executed.
+   */
+  public get condition(): string | undefined {
+    if (this._conditions?.length) {
+      return this._conditions.join(" && ");
+    }
+    return undefined;
+  }
+
+  /**
+   * Add a command to execute which determines if the task should be skipped.
+   *
+   * If a condition already exists, the new condition will be appended with ` && ` delimiter.
+   * @param condition The command to execute.
+   * @see {@link Task.condition}
+   */
+  public addCondition(...condition: string[]): void {
+    this._conditions.push(...condition);
   }
 
   /**
@@ -211,6 +237,12 @@ export class Task {
   }
 
   /**
+   * Returns all environment variables in the task level
+   */
+  public get envVars(): Readonly<{ [name: string]: string }> {
+    return this._env;
+  }
+  /**
    * Returns an immutable copy of all the step specifications of the task.
    */
   public get steps() {
@@ -228,12 +260,39 @@ export class Task {
    * @internal
    */
   public _renderSpec(): TaskSpec {
+    // Ensure task-level env vars are strings
+    const env = Object.keys(this._env).reduce(
+      (prev, curr) => ({
+        ...prev,
+        [curr]: this.getEnvString(curr, this._env[curr]),
+      }),
+      {}
+    );
+
+    // Ensure step-level env vars are strings
+    const steps = Array.isArray(this._steps)
+      ? [...this._steps].map((s) => {
+          return s.env
+            ? {
+                ...s,
+                env: Object.keys(s.env).reduce(
+                  (prev, curr) => ({
+                    ...prev,
+                    [curr]: this.getEnvString(curr, s.env![curr]),
+                  }),
+                  {}
+                ),
+              }
+            : s;
+        })
+      : this._steps;
+
     return {
       name: this.name,
       description: this.description,
-      env: this._env,
+      env: env,
       requiredEnv: this.requiredEnv,
-      steps: this._steps,
+      steps: steps,
       condition: this.condition,
       cwd: this.cwd,
     };
@@ -242,6 +301,21 @@ export class Task {
   private assertUnlocked() {
     if (this._locked) {
       throw new Error(`Task "${this.name}" is locked for changes`);
+    }
+  }
+
+  /**
+   * Ensure that environment variables are persisted as strings
+   * to prevent type errors when parsing from tasks.json in future
+   */
+  private getEnvString(name: string, value: any) {
+    if (typeof value !== "string" && value !== undefined) {
+      warn(
+        `Received non-string value for environment variable ${name}. Value will be stringified.`
+      );
+      return String(value);
+    } else {
+      return value;
     }
   }
 }

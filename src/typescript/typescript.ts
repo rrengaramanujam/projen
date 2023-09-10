@@ -20,6 +20,7 @@ import {
   ProjenrcOptions as ProjenrcTsOptions,
   TypedocDocgen,
 } from "../typescript";
+import { deepMerge } from "../util";
 
 export interface TypeScriptProjectOptions extends NodeProjectOptions {
   /**
@@ -111,6 +112,12 @@ export interface TypeScriptProjectOptions extends NodeProjectOptions {
    * @default false
    */
   readonly disableTsconfig?: boolean;
+  /**
+   * Do not generate a `tsconfig.dev.json` file.
+   *
+   * @default false
+   */
+  readonly disableTsconfigDev?: boolean;
 
   /**
    * Generate one-time sample in `src/` and `test/` if there are no files there.
@@ -128,6 +135,7 @@ export interface TypeScriptProjectOptions extends NodeProjectOptions {
    * Use TypeScript for your projenrc file (`.projenrc.ts`).
    *
    * @default false
+   * @pjnew true
    */
   readonly projenrcTs?: boolean;
 
@@ -184,7 +192,7 @@ export class TypeScriptProject extends NodeProject {
         ...options.jestOptions,
         jestConfig: {
           ...options.jestOptions?.jestConfig,
-          testMatch: [],
+          testMatch: options.jestOptions?.jestConfig?.testMatch ?? [],
         },
       },
     });
@@ -246,6 +254,12 @@ export class TypeScriptProject extends NodeProject {
       target: "ES2019",
     };
 
+    if (options.disableTsconfigDev && options.disableTsconfig) {
+      throw new Error(
+        "Cannot specify both 'disableTsconfigDev' and 'disableTsconfig' fields."
+      );
+    }
+
     if (!options.disableTsconfig) {
       this.tsconfig = new TypescriptConfig(
         this,
@@ -264,24 +278,28 @@ export class TypeScriptProject extends NodeProject {
       );
     }
 
-    const tsconfigDevFile = options.tsconfigDevFile ?? "tsconfig.dev.json";
-    this.tsconfigDev = new TypescriptConfig(
-      this,
-      mergeTsconfigOptions(
-        {
-          fileName: tsconfigDevFile,
-          include: [
-            PROJEN_RC,
-            `${this.srcdir}/**/*.ts`,
-            `${this.testdir}/**/*.ts`,
-          ],
-          exclude: ["node_modules"],
-          compilerOptions: compilerOptionDefaults,
-        },
-        options.tsconfig,
-        options.tsconfigDev
-      )
-    );
+    if (options.disableTsconfigDev) {
+      this.tsconfigDev = this.tsconfig!;
+    } else {
+      const tsconfigDevFile = options.tsconfigDevFile ?? "tsconfig.dev.json";
+      this.tsconfigDev = new TypescriptConfig(
+        this,
+        mergeTsconfigOptions(
+          {
+            fileName: tsconfigDevFile,
+            include: [
+              PROJEN_RC,
+              `${this.srcdir}/**/*.ts`,
+              `${this.testdir}/**/*.ts`,
+            ],
+            exclude: ["node_modules"],
+            compilerOptions: compilerOptionDefaults,
+          },
+          options.tsconfig,
+          options.tsconfigDev
+        )
+      );
+    }
 
     this.gitignore.include(`/${this.srcdir}/`);
     this.npmignore?.exclude(`/${this.srcdir}/`);
@@ -319,31 +337,20 @@ export class TypeScriptProject extends NodeProject {
       }
     }
 
-    const projenrcTypeScript = options.projenrcTs ?? false;
-
-    const projenRcFilename = projenrcTypeScript
-      ? options.projenrcTsOptions?.filename ?? ".projenrc.ts"
-      : undefined;
-
     if (options.eslint ?? true) {
-      const devdirs = [this.testdir, "build-tools"];
-      if (projenrcTypeScript) {
-        devdirs.push(options.projenrcTsOptions?.projenCodeDir ?? "projenrc");
-      }
-
       this.eslint = new Eslint(this, {
         tsconfigPath: `./${this.tsconfigDev.fileName}`,
         dirs: [this.srcdir],
-        devdirs,
+        devdirs: [this.testdir, "build-tools"],
         fileExtensions: [".ts", ".tsx"],
-        lintProjenRcFile: projenRcFilename,
+        lintProjenRc: false,
         ...options.eslintOptions,
       });
 
       this.tsconfigEslint = this.tsconfigDev;
     }
 
-    if (projenrcTypeScript) {
+    if (!this.parent && options.projenrcTs) {
       new ProjenrcTs(this, options.projenrcTsOptions);
     }
 
@@ -362,7 +369,7 @@ export class TypeScriptProject extends NodeProject {
       // Additionally, we default to tracking the 12.x line, as the current earliest LTS release of
       // node is 12.x, so this is what corresponds to the broadest compatibility with supported node
       // runtimes.
-      `@types/node@^${semver.major(this.package.minNodeVersion ?? "14.0.0")}`
+      `@types/node@^${semver.major(this.package.minNodeVersion ?? "16.0.0")}`
     );
 
     // generate sample code in `src` and `lib` if these directories are empty or non-existent.
@@ -440,12 +447,17 @@ export class TypeScriptProject extends NodeProject {
     );
 
     // add relevant deps
-    jest.config.preset = "ts-jest";
-    jest.config.globals = {
-      "ts-jest": {
-        tsconfig: this.tsconfigDev.fileName,
+    if (!jest.config.preset) {
+      jest.config.preset = "ts-jest";
+    }
+    jest.config.globals = deepMerge([
+      {
+        "ts-jest": {
+          tsconfig: this.tsconfigDev.fileName,
+        },
       },
-    };
+      jest.config.globals,
+    ]);
   }
 }
 

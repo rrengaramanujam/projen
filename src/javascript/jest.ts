@@ -1,7 +1,9 @@
 import * as path from "path";
 import * as semver from "semver";
+import { Component } from "../component";
 import { NodeProject } from "../javascript";
 import { JsonFile } from "../json";
+import { Project } from "../project";
 
 const DEFAULT_TEST_REPORTS_DIR = "test-reports";
 
@@ -426,7 +428,7 @@ export interface JestConfigOptions {
    * synchronous function for transforming source files.
    * @default - {"\\.[jt]sx?$": "babel-jest"}
    */
-  readonly transform?: { [key: string]: string | [string, any] };
+  readonly transform?: { [key: string]: Transform };
 
   /**
    * An array of regexp pattern strings that are matched against all source file paths before transformation.
@@ -463,7 +465,7 @@ export interface JestConfigOptions {
    *
    * @default -
    */
-  readonly watchPlugins?: [string | [string, any]];
+  readonly watchPlugins?: WatchPlugin[];
 
   /**
    * Whether to use watchman for file crawling.
@@ -474,7 +476,52 @@ export interface JestConfigOptions {
   /**
    * Escape hatch to allow any value
    */
+  readonly additionalOptions?: { [name: string]: any };
+
+  /**
+   * Escape hatch to allow any value (JS/TS only)
+   *
+   * @deprecated use `additionalOptions` instead.
+   *
+   * @jsii ignore
+   */
   readonly [name: string]: any;
+}
+
+export class Transform {
+  public constructor(
+    private readonly name: string,
+    private readonly options?: any
+  ) {}
+
+  /**
+   * @jsii ignore
+   * @internal
+   */
+  public toJSON() {
+    if (this.options != null) {
+      return [this.name, this.options];
+    }
+    return this.name;
+  }
+}
+
+export class WatchPlugin {
+  public constructor(
+    private readonly name: string,
+    private readonly options?: any
+  ) {}
+
+  /**
+   * @jsii ignore
+   * @internal
+   */
+  public toJSON() {
+    if (this.options != null) {
+      return [this.name, this.options];
+    }
+    return this.name;
+  }
 }
 
 export interface JestOptions {
@@ -580,7 +627,23 @@ export interface HasteConfig {
   readonly throwOnModuleCollision?: boolean;
 }
 
-type JestReporter = [string, { [key: string]: any }] | string;
+export class JestReporter {
+  public constructor(
+    private readonly name: string,
+    private readonly options?: { [key: string]: any }
+  ) {}
+
+  /**
+   * @jsii ignore
+   * @internal
+   */
+  public toJSON(): any {
+    if (this.options == null) {
+      return this.name;
+    }
+    return [this.name, this.options];
+  }
+}
 
 /**
  * Installs the following npm scripts:
@@ -590,26 +653,44 @@ type JestReporter = [string, { [key: string]: any }] | string;
  * - `test:update`, intended for testing locally and updating snapshots to match the latest unit under test. Only available when `updateSnapshot: UpdateSnapshot: NEVER`.
  *
  */
-export class Jest {
+export class Jest extends Component {
+  /**
+   * Returns the singletone Jest component of a project or undefined if there is none.
+   */
+  public static of(project: Project): Jest | undefined {
+    const isJest = (c: Component): c is Jest => c instanceof Jest;
+    return project.components.find(isJest);
+  }
+
   /**
    * Escape hatch.
    */
-  public readonly config: any;
-  public readonly jestVersion: string;
+  readonly config: any;
+
+  /**
+   * Jest version, including `@` symbol, like `@^29`
+   */
+  readonly jestVersion: string;
+
+  /**
+   * Jest config file. `undefined` if settings are written to `package.json`
+   */
+  readonly file?: JsonFile;
 
   private readonly testMatch: string[];
   private readonly ignorePatterns: string[];
   private readonly watchIgnorePatterns: string[];
   private readonly coverageReporters: string[];
-  private readonly project: NodeProject;
-  private readonly file?: JsonFile;
   private readonly reporters: JestReporter[];
-  private readonly jestConfig?: JestConfigOptions;
+  private readonly jestConfig?: JestConfigOptions & {
+    readonly additionalOptions: undefined;
+    [key: string]: unknown;
+  };
   private readonly extraCliOptions: string[];
   private _snapshotResolver: string | undefined;
 
   constructor(project: NodeProject, options: JestOptions = {}) {
-    this.project = project;
+    super(project);
 
     // hard deprecation
     if ((options as any).typescriptConfig) {
@@ -623,7 +704,11 @@ export class Jest {
     this.jestVersion = options.jestVersion ? `@${options.jestVersion}` : "";
     project.addDevDeps(`jest${this.jestVersion}`);
 
-    this.jestConfig = options.jestConfig;
+    this.jestConfig = {
+      ...options.jestConfig,
+      additionalOptions: undefined,
+      ...options.jestConfig?.additionalOptions,
+    };
     this.extraCliOptions = options.extraCliOptions ?? [];
 
     this.ignorePatterns = this.jestConfig?.testPathIgnorePatterns ??
@@ -647,7 +732,7 @@ export class Jest {
     this.reporters = [];
 
     if (options.preserveDefaultReporters ?? true) {
-      this.reporters.unshift("default");
+      this.reporters.unshift(new JestReporter("default"));
     }
 
     this.config = {
@@ -664,14 +749,16 @@ export class Jest {
       testMatch: this.testMatch,
       reporters: this.reporters,
       snapshotResolver: (() => this._snapshotResolver) as any,
-    } as JestConfigOptions;
+    } satisfies JestConfigOptions;
 
     if (options.junitReporting ?? true) {
       const reportsDir = DEFAULT_TEST_REPORTS_DIR;
 
-      this.addReporter(["jest-junit", { outputDirectory: reportsDir }]);
+      this.addReporter(
+        new JestReporter("jest-junit", { outputDirectory: reportsDir })
+      );
 
-      project.addDevDeps("jest-junit@^13");
+      project.addDevDeps("jest-junit@^15");
 
       project.gitignore.exclude(
         "# jest-junit artifacts",
@@ -703,6 +790,7 @@ export class Jest {
       this.file = new JsonFile(project, options.configFilePath, {
         obj: this.config,
       });
+      project.npmignore?.addPatterns(`/${this.file.path}`);
     } else {
       project.addFields({ jest: this.config });
     }
@@ -740,6 +828,28 @@ export class Jest {
     this.reporters.push(reporter);
   }
 
+  /**
+   * Adds a a setup file to Jest's setupFiles configuration.
+   * @param file File path to setup file
+   */
+  public addSetupFile(file: string) {
+    if (!this.config.setupFiles) {
+      this.config.setupFiles = [];
+    }
+    this.config.setupFiles.push(file);
+  }
+
+  /**
+   * Adds a a setup file to Jest's setupFilesAfterEnv configuration.
+   * @param file File path to setup file
+   */
+  public addSetupFileAfterEnv(file: string) {
+    if (!this.config.setupFilesAfterEnv) {
+      this.config.setupFilesAfterEnv = [];
+    }
+    this.config.setupFilesAfterEnv.push(file);
+  }
+
   public addSnapshotResolver(file: string) {
     this._snapshotResolver = file;
   }
@@ -754,6 +864,7 @@ export class Jest {
     // as recommended in the jest docs, node > 14 may use native v8 coverage collection
     // https://jestjs.io/docs/en/cli#--coverageproviderprovider
     if (
+      this.project instanceof NodeProject &&
       this.project.package.minNodeVersion &&
       semver.gte(this.project.package.minNodeVersion, "14.0.0")
     ) {

@@ -1,4 +1,4 @@
-const { cdk, JsonFile, TextFile } = require("./lib");
+const { cdk, javascript, JsonFile, TextFile } = require("./lib");
 const { PROJEN_MARKER } = require("./lib/common");
 
 const project = new cdk.JsiiProject({
@@ -20,18 +20,25 @@ const project = new cdk.JsiiProject({
     "cdk",
   ],
 
-  pullRequestTemplateContents: [
-    "---",
-    "By submitting this pull request, I confirm that my contribution is made under the terms of the Apache 2.0 license.",
-  ],
+  githubOptions: {
+    pullRequestLintOptions: {
+      contributorStatement:
+        "By submitting this pull request, I confirm that my contribution is made under the terms of the Apache 2.0 license.",
+      contributorStatementOptions: {
+        exemptUsers: ["cdklabs-automation", "dependabot[bot]"],
+      },
+    },
+  },
+
+  jsiiVersion: "5.1.x",
+  typescriptVersion: "5.1.x",
 
   bundledDeps: [
     "conventional-changelog-config-spec",
-    "yaml@2.0.0",
-    "fs-extra",
+    "yaml@^2.2.2",
     "yargs",
     "case",
-    "glob@^7",
+    "glob@^8",
     "semver",
     "chalk",
     "@iarna/toml",
@@ -39,13 +46,11 @@ const project = new cdk.JsiiProject({
     "ini",
     "shx",
     "fast-json-patch",
-    "zlib",
     "comment-json@4.2.2",
   ],
 
   devDeps: [
     "@types/conventional-changelog-config-spec",
-    "@types/fs-extra@^8",
     "@types/yargs",
     "@types/glob",
     "@types/semver",
@@ -58,12 +63,18 @@ const project = new cdk.JsiiProject({
   depsUpgradeOptions: {
     // markmac depends on projen, we are excluding it here to avoid a circular update loop
     exclude: ["markmac"],
+    workflowOptions: {
+      // Run projen's daily upgrade (and release) acyclic to the schedule that projects are on so they get updates faster
+      schedule: javascript.UpgradeDependenciesSchedule.expressions([
+        "0 12 * * *",
+      ]),
+    },
   },
 
   projenDevDependency: false, // because I am projen
   releaseToNpm: true,
-  minNodeVersion: "14.0.0",
-  workflowNodeVersion: "14.18.0", // required by eslint-import-resolver-typescript@3.5.0
+  minNodeVersion: "14.0.0", // Do not change this before a version has been EOL for a while
+  workflowNodeVersion: "16.14.0",
 
   codeCov: true,
   prettier: true,
@@ -75,6 +86,13 @@ const project = new cdk.JsiiProject({
 
   // cli tests need projen to be compiled
   compileBeforeTest: true,
+
+  // Disable interop since it's disabled available in jsii
+  tsconfigDev: {
+    compilerOptions: {
+      esModuleInterop: false,
+    },
+  },
 
   jestOptions: {
     // makes it very hard to iterate with jest --watch

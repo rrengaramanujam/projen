@@ -112,17 +112,30 @@ export interface Artifacts {
 }
 
 /**
+ * Code coverage report interface
+ * @link https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportscoverage_report
+ */
+export interface CoverageReport {
+  readonly coverageFormat: string;
+  readonly path: string;
+}
+
+/**
  * Reports will be uploaded as artifacts, and often displayed in the Gitlab UI, such as in
  * Merge Requests.
  * @see https://docs.gitlab.com/ee/ci/yaml/#artifactsreports
  */
 export interface Reports {
-  /** Path for file(s) that should be parsed as Cobertura XML coverage report*/
+  /** Path for file(s) that should be parsed as Cobertura XML coverage report
+   * @deprecated per {@link https://docs.gitlab.com/ee/update/deprecations.html#artifactsreportscobertura-keyword} use {@link coverageReport} instead
+   */
   readonly cobertura?: string[];
   /** Path to file or list of files with code quality report(s) (such as Code Climate).*/
   readonly codequality?: string[];
   /** Path to file or list of files with Container scanning vulnerabilities report(s).*/
   readonly containerScanning?: string[];
+  /** Code coverage report information */
+  readonly coverageReport?: CoverageReport;
   /** Path to file or list of files with DAST vulnerabilities report(s).*/
   readonly dast?: string[];
   /** Path to file or list of files with Dependency scanning vulnerabilities report(s).*/
@@ -149,6 +162,15 @@ export interface Reports {
   readonly secretDetection?: string[];
   /** Path to file or list of files with terraform plan(s).*/
   readonly terraform?: string[];
+}
+
+/**
+ * id_tokens Definition.
+ * @see https://docs.gitlab.com/ee/ci/yaml/#id_tokens
+ */
+export interface IDToken {
+  /** The required aud sub-keyword is used to configure the aud claim for the JWT. */
+  aud: string[] | string;
 }
 
 /**
@@ -280,6 +302,8 @@ export interface Job {
   readonly except?: string[] | Filter;
   /** The name of one or more jobs to inherit configuration from.*/
   readonly extends?: string[];
+  /** Configurable ID tokens (JSON Web Tokens) that are used for CI/CD authentication */
+  readonly idTokens?: Record<string, IDToken>;
   /* Specifies the default docker image to used for the job. */
   readonly image?: Image;
   /** Controls inheritance of globally-defined defaults and variables. Boolean values control inheritance of all default: or variables: keywords. To inherit only a subset of default: or variables: keywords, specify what you wish to inherit. Anything not listed is not inherited.*/

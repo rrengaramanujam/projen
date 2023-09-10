@@ -52,7 +52,7 @@ describe("bundled function", () => {
       name: "bundle:hello.lambda",
       steps: [
         {
-          exec: 'esbuild --bundle src/hello.lambda.ts --target="node14" --platform="node" --outfile="my-assets/hello.lambda/index.js" --tsconfig="tsconfig.dev.json" --external:aws-sdk',
+          exec: 'esbuild --bundle src/hello.lambda.ts --target="node16" --platform="node" --outfile="my-assets/hello.lambda/index.js" --tsconfig="tsconfig.dev.json" --external:aws-sdk',
         },
       ],
     });
@@ -126,6 +126,31 @@ test("runtime can be used to customize the lambda runtime and esbuild target", (
     steps: [
       {
         exec: 'esbuild --bundle src/hello.lambda.ts --target="node12" --platform="node" --outfile="assets/hello.lambda/index.js" --tsconfig="tsconfig.dev.json" --external:aws-sdk',
+      },
+    ],
+  });
+});
+
+test("aws sdk v3 packages are considered external with NODEJS_18_X", () => {
+  const project = new TypeScriptProject({
+    name: "hello",
+    defaultReleaseBranch: "main",
+  });
+
+  new awscdk.LambdaFunction(project, {
+    entrypoint: join("src", "hello.lambda.ts"),
+    runtime: awscdk.LambdaRuntime.NODEJS_18_X,
+    cdkDeps: cdkDepsForProject(project),
+  });
+
+  const snapshot = Testing.synth(project);
+  const tasks = snapshot[".projen/tasks.json"].tasks;
+  expect(tasks["bundle:hello.lambda"]).toEqual({
+    description: "Create a JavaScript bundle from src/hello.lambda.ts",
+    name: "bundle:hello.lambda",
+    steps: [
+      {
+        exec: 'esbuild --bundle src/hello.lambda.ts --target="node18" --platform="node" --outfile="assets/hello.lambda/index.js" --tsconfig="tsconfig.dev.json" --external:@aws-sdk/*',
       },
     ],
   });

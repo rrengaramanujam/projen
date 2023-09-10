@@ -16,11 +16,13 @@ The following tools need to be installed to develop on projen locally.
 - [Yarn]
 - [Maven]
 - [Go]
+- [git] >= 2.28
 
 [node]: https://nodejs.org/en/download/
 [yarn]: https://yarnpkg.com/en/docs/install
 [maven]: https://maven.apache.org/install
 [go]: https://go.dev/doc/install
+[git]: https://git-scm.com/downloads
 
 ## Getting Started
 
@@ -32,6 +34,8 @@ $ cd projen
 $ yarn # install dependencies
 $ yarn build # build projen
 ```
+
+Attention Windows users: It has been noted that there are compatibility issues between Git Bash and the Projen build script when running on Windows. Therefore, we recommend directly utilizing the WSL (Windows Subsystem Linux) terminal to build the Projen project.
 
 ## Code Organization
 
@@ -118,8 +122,7 @@ npm utility.
 ## Making a pull request
 
 - Commit title and message (and PR title and description) must adhere to [conventionalcommits](https://www.conventionalcommits.org).
-  - The title must begin with `feat(module): title`, `fix(module): title`,
-    `refactor(module): title` or `chore(module): title`, where the module refers
+  - The title must begin with `feat(module): title`, `fix(module): title` or `chore(module): title`, where the module refers
     to the projects or components that the change centers on.
     The module can be omitted, so "feat: title" is okay as well.
   - Title should be lowercase.

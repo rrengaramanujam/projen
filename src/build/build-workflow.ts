@@ -10,12 +10,14 @@ import { WorkflowActions } from "../github/workflow-actions";
 import {
   Job,
   JobPermission,
+  JobPermissions,
   JobStep,
   Tools,
   Triggers,
 } from "../github/workflows-model";
 import { NodeProject } from "../javascript";
 import { Project } from "../project";
+import { GroupRunnerOptions, filteredRunsOnOptions } from "../runner-options";
 
 const PULL_REQUEST_REF = "${{ github.event.pull_request.head.ref }}";
 const PULL_REQUEST_REPOSITORY =
@@ -38,6 +40,13 @@ export interface BuildWorkflowOptions {
    * A name of a directory that includes build artifacts.
    */
   readonly artifactsDirectory: string;
+
+  /**
+   * Name of the buildfile (e.g. "build" becomes "build.yml").
+   *
+   * @default "build"
+   */
+  readonly name?: string;
 
   /**
    * The container image to use for builds.
@@ -87,14 +96,30 @@ export interface BuildWorkflowOptions {
   /**
    * Github Runner selection labels
    * @default ["ubuntu-latest"]
+   * @description Defines a target Runner by labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
    */
   readonly runsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly runsOnGroup?: GroupRunnerOptions;
 
   /**
    * Build workflow triggers
    * @default "{ pullRequest: {}, workflowDispatch: {} }"
    */
   readonly workflowTriggers?: Triggers;
+
+  /**
+   * Permissions granted to the build job
+   * To limit job permissions for `contents`, the desired permissions have to be explicitly set, e.g.: `{ contents: JobPermission.NONE }`
+   * @default `{ contents: JobPermission.WRITE }`
+   */
+  readonly permissions?: JobPermissions;
 }
 
 export class BuildWorkflow extends Component {
@@ -105,7 +130,7 @@ export class BuildWorkflow extends Component {
   private readonly github: GitHub;
   private readonly workflow: GithubWorkflow;
   private readonly artifactsDirectory: string;
-  private readonly defaultRunners: string[] = ["ubuntu-latest"];
+  private readonly name: string;
 
   private readonly _postBuildJobs: string[] = [];
 
@@ -125,9 +150,10 @@ export class BuildWorkflow extends Component {
     this.gitIdentity = options.gitIdentity ?? DEFAULT_GITHUB_ACTIONS_USER;
     this.buildTask = options.buildTask;
     this.artifactsDirectory = options.artifactsDirectory;
+    this.name = options.name ?? "build";
     const mutableBuilds = options.mutableBuild ?? true;
 
-    this.workflow = new GithubWorkflow(github, "build");
+    this.workflow = new GithubWorkflow(github, this.name);
     this.workflow.on(
       options.workflowTriggers ?? {
         pullRequest: {},
@@ -147,8 +173,8 @@ export class BuildWorkflow extends Component {
   }
 
   private addBuildJob(options: BuildWorkflowOptions) {
-    this.workflow.addJob(BUILD_JOBID, {
-      runsOn: options.runsOn ?? this.defaultRunners,
+    const jobConfig = {
+      ...filteredRunsOnOptions(options.runsOn, options.runsOnGroup),
       container: options.containerImage
         ? { image: options.containerImage }
         : undefined,
@@ -158,6 +184,7 @@ export class BuildWorkflow extends Component {
       },
       permissions: {
         contents: JobPermission.WRITE,
+        ...options.permissions,
       },
       steps: (() => this.renderBuildSteps()) as any,
       outputs: {
@@ -166,7 +193,9 @@ export class BuildWorkflow extends Component {
           outputName: SELF_MUTATION_HAPPENED_OUTPUT,
         },
       },
-    });
+    };
+
+    this.workflow.addJob(BUILD_JOBID, jobConfig);
   }
 
   /**
@@ -256,7 +285,7 @@ export class BuildWorkflow extends Component {
         checkoutRepo: true,
         installDeps: true,
         tools: options.tools,
-        runsOn: options.runsOn,
+        ...filteredRunsOnOptions(options.runsOn, options.runsOnGroup),
       }
     );
   }
@@ -285,6 +314,7 @@ export class BuildWorkflow extends Component {
         with: {
           ref: PULL_REQUEST_REF,
           repository: PULL_REQUEST_REPOSITORY,
+          ...(this.github.downloadLfs ? { lfs: true } : {}),
         },
       });
     }
@@ -307,14 +337,14 @@ export class BuildWorkflow extends Component {
         contents: JobPermission.READ,
       },
       tools: options?.tools,
-      runsOn: options?.runsOn ?? this.defaultRunners,
+      ...filteredRunsOnOptions(options?.runsOn, options?.runsOnGroup),
       steps,
     });
   }
 
   private addSelfMutationJob(options: BuildWorkflowOptions) {
     this.workflow.addJob("self-mutation", {
-      runsOn: options.runsOn ?? this.defaultRunners,
+      ...filteredRunsOnOptions(options.runsOn, options.runsOnGroup),
       permissions: {
         contents: JobPermission.WRITE,
       },
@@ -327,14 +357,18 @@ export class BuildWorkflow extends Component {
           token: this.workflow.projenCredentials.tokenRef,
           ref: PULL_REQUEST_REF,
           repository: PULL_REQUEST_REPOSITORY,
+          lfs: this.github.downloadLfs,
         }),
-        ...WorkflowActions.setGitIdentity(this.gitIdentity),
+        ...WorkflowActions.setupGitIdentity(this.gitIdentity),
         {
           name: "Push changes",
+          env: {
+            PULL_REQUEST_REF,
+          },
           run: [
-            "  git add .",
-            '  git commit -s -m "chore: self mutation"',
-            `  git push origin HEAD:${PULL_REQUEST_REF}`,
+            "git add .",
+            'git commit -s -m "chore: self mutation"',
+            `git push origin HEAD:$PULL_REQUEST_REF`,
           ].join("\n"),
         },
       ],
@@ -352,6 +386,7 @@ export class BuildWorkflow extends Component {
         with: {
           ref: PULL_REQUEST_REF,
           repository: PULL_REQUEST_REPOSITORY,
+          ...(this.github.downloadLfs ? { lfs: true } : {}),
         },
       },
 
@@ -365,7 +400,7 @@ export class BuildWorkflow extends Component {
       ...this.postBuildSteps,
 
       // check for mutations and upload a git patch file as an artifact
-      ...WorkflowActions.createUploadGitPatch({
+      ...WorkflowActions.uploadGitPatch({
         stepId: SELF_MUTATION_STEP,
         outputName: SELF_MUTATION_HAPPENED_OUTPUT,
         mutationError:
@@ -406,8 +441,17 @@ export interface AddPostBuildJobTaskOptions {
   /**
    * Github Runner selection labels
    * @default ["ubuntu-latest"]
+   * @description Defines a target Runner by labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
    */
   readonly runsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly runsOnGroup?: GroupRunnerOptions;
 }
 
 /**
@@ -440,6 +484,15 @@ export interface AddPostBuildJobCommandsOptions {
   /**
    * Github Runner selection labels
    * @default ["ubuntu-latest"]
+   * @description Defines a target Runner by labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
    */
   readonly runsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly runsOnGroup?: GroupRunnerOptions;
 }

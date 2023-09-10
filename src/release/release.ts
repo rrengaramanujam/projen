@@ -1,15 +1,25 @@
 import * as path from "path";
+import { Publisher } from "./publisher";
+import { ReleaseTrigger } from "./release-trigger";
 import { Component } from "../component";
 import { GitHub, GitHubProject, GithubWorkflow, TaskWorkflow } from "../github";
 import {
   BUILD_ARTIFACT_NAME,
   PERMISSION_BACKUP_FILE,
 } from "../github/constants";
-import { Job, JobPermission, JobStep } from "../github/workflows-model";
+import {
+  Job,
+  JobPermission,
+  JobPermissions,
+  JobStep,
+} from "../github/workflows-model";
+import {
+  GroupRunnerOptions,
+  filteredRunsOnOptions,
+  filteredWorkflowRunsOnOptions,
+} from "../runner-options";
 import { Task } from "../task";
-import { Version } from "../version";
-import { Publisher } from "./publisher";
-import { ReleaseTrigger } from "./release-trigger";
+import { ReleasableCommits, Version } from "../version";
 
 const BUILD_JOBID = "release";
 const GIT_REMOTE_STEPID = "git_remote";
@@ -172,8 +182,17 @@ export interface ReleaseProjectOptions {
   /**
    * Github Runner selection labels
    * @default ["ubuntu-latest"]
+   * @description Defines a target Runner by labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
    */
   readonly workflowRunsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly workflowRunsOnGroup?: GroupRunnerOptions;
 
   /**
    * Define publishing tasks that can be executed manually as well as workflows.
@@ -191,6 +210,14 @@ export interface ReleaseProjectOptions {
    * @default false
    */
   readonly publishDryRun?: boolean;
+
+  /**
+   * Find commits that should be considered releasable
+   * Used to decide if a release is required.
+   *
+   * @default ReleasableCommits.everyCommit()
+   */
+  readonly releasableCommits?: ReleasableCommits;
 }
 
 /**
@@ -240,9 +267,15 @@ export interface ReleaseOptions extends ReleaseProjectOptions {
    * are needed. For example `publib`, the CLI projen uses to publish releases,
    * is an npm library.
    *
-   * @default 14.x
+   * @default 16.x
    */
   readonly workflowNodeVersion?: string;
+
+  /**
+   * Permissions granted to the release workflow job
+   * @default `{ contents: JobPermission.WRITE }`
+   */
+  readonly workflowPermissions?: JobPermissions;
 }
 
 /**
@@ -279,6 +312,8 @@ export class Release extends Component {
   private readonly defaultBranch: ReleaseBranch;
   private readonly github?: GitHub;
   private readonly workflowRunsOn?: string[];
+  private readonly workflowRunsOnGroup?: GroupRunnerOptions;
+  private readonly workflowPermissions: JobPermissions;
 
   private readonly _branchHooks: BranchHook[];
 
@@ -305,6 +340,11 @@ export class Release extends Component {
     this.releaseTrigger = options.releaseTrigger ?? ReleaseTrigger.continuous();
     this.containerImage = options.workflowContainerImage;
     this.workflowRunsOn = options.workflowRunsOn;
+    this.workflowRunsOnGroup = options.workflowRunsOnGroup;
+    this.workflowPermissions = {
+      contents: JobPermission.WRITE,
+      ...options.workflowPermissions,
+    };
     this._branchHooks = [];
 
     /**
@@ -334,6 +374,7 @@ export class Release extends Component {
       artifactsDirectory: this.artifactsDirectory,
       versionrcOptions: options.versionrcOptions,
       tagPrefix: options.releaseTagPrefix,
+      releasableCommits: options.releasableCommits,
     });
 
     this.publisher = new Publisher(project, {
@@ -343,10 +384,14 @@ export class Release extends Component {
       jsiiReleaseVersion: options.jsiiReleaseVersion,
       failureIssue: options.releaseFailureIssue,
       failureIssueLabel: options.releaseFailureIssueLabel,
-      workflowRunsOn: options.workflowRunsOn,
+      ...filteredWorkflowRunsOnOptions(
+        options.workflowRunsOn,
+        options.workflowRunsOnGroup
+      ),
       publishTasks: options.publishTasks,
       dryRun: options.publishDryRun,
       workflowNodeVersion: options.workflowNodeVersion,
+      workflowContainerImage: options.workflowContainerImage,
     });
 
     const githubRelease = options.githubRelease ?? true;
@@ -625,18 +670,17 @@ export class Release extends Component {
         env: {
           CI: "true",
         },
-        permissions: {
-          contents: JobPermission.WRITE,
-        },
+        permissions: this.workflowPermissions,
         checkoutWith: {
-          // we must use 'fetch-depth=0' in order to fetch all tags
-          // otherwise tags are not checked out
+          // fetch-depth= indicates all history for all branches and tags
+          // we must use this in order to fetch all tags
+          // and to inspect the history to decide if we should release
           "fetch-depth": 0,
         },
         preBuildSteps,
         task: releaseTask,
         postBuildSteps,
-        runsOn: this.workflowRunsOn,
+        ...filteredRunsOnOptions(this.workflowRunsOn, this.workflowRunsOnGroup),
       });
     } else {
       return undefined;
@@ -663,6 +707,11 @@ export interface BranchOptions {
    * The minimum major version to release.
    */
   readonly minMajorVersion?: number;
+
+  /**
+   * The minor versions released from this branch.
+   */
+  readonly minorVersion?: number;
 
   /**
    * Bump the version as a pre-release tag.

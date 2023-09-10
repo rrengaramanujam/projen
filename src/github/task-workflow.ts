@@ -1,4 +1,3 @@
-import { Task } from "../task";
 import { DEFAULT_GITHUB_ACTIONS_USER } from "./constants";
 import { GitHub } from "./github";
 import { WorkflowActions } from "./workflow-actions";
@@ -11,6 +10,8 @@ import {
   JobStepOutput,
   Triggers,
 } from "./workflows-model";
+import { GroupRunnerOptions, filteredRunsOnOptions } from "../runner-options";
+import { Task } from "../task";
 
 const DEFAULT_JOB_ID = "build";
 
@@ -111,8 +112,24 @@ export interface TaskWorkflowOptions {
   /**
    * Github Runner selection labels
    * @default ["ubuntu-latest"]
+   * @description Defines a target Runner by labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
    */
   readonly runsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly runsOnGroup?: GroupRunnerOptions;
+
+  /**
+   * Whether to download files from Git LFS for this workflow
+   *
+   * @default - Use the setting on the corresponding GitHub project
+   */
+  readonly downloadLfs?: boolean;
 }
 
 /**
@@ -145,9 +162,14 @@ export class TaskWorkflow extends GithubWorkflow {
     });
 
     const preCheckoutSteps = options.preCheckoutSteps ?? [];
-    const checkoutWith = options.checkoutWith
-      ? { with: options.checkoutWith }
-      : {};
+
+    const checkoutWith: Record<string, any> = {};
+    if (options.downloadLfs ?? github.downloadLfs) {
+      checkoutWith.lfs = true;
+    }
+    // 'checkoutWith' can override 'lfs'
+    Object.assign(checkoutWith, options.checkoutWith ?? {});
+
     const preBuildSteps = options.preBuildSteps ?? [];
     const postBuildSteps = options.postBuildSteps ?? [];
     const gitIdentity = options.gitIdentity ?? DEFAULT_GITHUB_ACTIONS_USER;
@@ -167,7 +189,7 @@ export class TaskWorkflow extends GithubWorkflow {
     }
 
     const job: Job = {
-      runsOn: options.runsOn ?? ["ubuntu-latest"],
+      ...filteredRunsOnOptions(options.runsOn, options.runsOnGroup),
       container: options.container,
       env: options.env,
       permissions: options.permissions,
@@ -180,11 +202,13 @@ export class TaskWorkflow extends GithubWorkflow {
         {
           name: "Checkout",
           uses: "actions/checkout@v3",
-          ...checkoutWith,
+          ...(Object.keys(checkoutWith).length > 0
+            ? { with: checkoutWith }
+            : {}),
         },
 
         // sets git identity so we can push later
-        ...WorkflowActions.setGitIdentity(gitIdentity),
+        ...WorkflowActions.setupGitIdentity(gitIdentity),
 
         ...preBuildSteps,
 

@@ -189,6 +189,19 @@ test("projenrc.ts", () => {
   });
 });
 
+test("mentions .projenrc.ts in the file marker", () => {
+  // GIVEN
+  const p = new TypeScriptProject({
+    name: "test",
+    defaultReleaseBranch: "main",
+    projenrcTs: true,
+  });
+
+  // THEN
+  const snapshot = synthSnapshot(p);
+  expect(snapshot[".gitignore"]).toContain("To modify, edit .projenrc.ts");
+});
+
 test("eslint configured to support .projenrc.ts and projenrc src dir", () => {
   const prj = new TypeScriptProject({
     name: "test",
@@ -233,7 +246,126 @@ test("upgrade task ignores pinned versions", () => {
     typescriptVersion: "4.4.4",
   });
   const tasks = synthSnapshot(prj)[TaskRuntime.MANIFEST_FILE].tasks;
-  expect(tasks.upgrade.steps[1].exec).toStrictEqual(
-    "npm-check-updates --dep dev --upgrade --target=minor --reject='typescript'"
-  );
+  expect(tasks.upgrade.steps).toMatchInlineSnapshot(`
+    [
+      {
+        "exec": "yarn upgrade npm-check-updates",
+      },
+      {
+        "exec": "npm-check-updates --upgrade --target=minor --peer --dep=dev,peer,prod,optional --filter=@types/jest,@types/node,@typescript-eslint/eslint-plugin,@typescript-eslint/parser,eslint-import-resolver-node,eslint-import-resolver-typescript,eslint-plugin-import,eslint,jest,jest-junit,npm-check-updates,projen,standard-version,ts-jest,npm",
+      },
+      {
+        "exec": "yarn install --check-files",
+      },
+      {
+        "exec": "yarn upgrade @types/jest @types/node @typescript-eslint/eslint-plugin @typescript-eslint/parser eslint-import-resolver-node eslint-import-resolver-typescript eslint-plugin-import eslint jest jest-junit npm-check-updates projen standard-version ts-jest npm",
+      },
+      {
+        "exec": "npx projen",
+      },
+      {
+        "spawn": "post-upgrade",
+      },
+    ]
+  `);
+});
+
+describe("jestConfig", () => {
+  test("uses default values", () => {
+    const prj = new TypeScriptProject({
+      defaultReleaseBranch: "main",
+      name: "test",
+      jestOptions: {
+        jestConfig: {
+          globals: {
+            "ts-jest": {
+              shouldBePreserved: true,
+            },
+          },
+        },
+      },
+    });
+    const snapshot = synthSnapshot(prj);
+    const jest = snapshot["package.json"].jest;
+    expect(jest.preset).toStrictEqual("ts-jest");
+    expect(jest.globals["ts-jest"].tsconfig).toStrictEqual("tsconfig.dev.json");
+    expect(jest.globals["ts-jest"].shouldBePreserved).toStrictEqual(true);
+  });
+
+  test("overrides default values", () => {
+    const prj = new TypeScriptProject({
+      defaultReleaseBranch: "main",
+      name: "test",
+      jestOptions: {
+        jestConfig: {
+          preset: "foo",
+          globals: {
+            "ts-jest": {
+              shouldBePreserved: true,
+              tsconfig: "bar",
+            },
+          },
+        },
+      },
+    });
+    const snapshot = synthSnapshot(prj);
+    const jest = snapshot["package.json"].jest;
+    expect(jest.preset).toStrictEqual("foo");
+    expect(jest.globals["ts-jest"].tsconfig).toStrictEqual("bar");
+    expect(jest.globals["ts-jest"].shouldBePreserved).toStrictEqual(true);
+  });
+});
+
+describe("tsconfigDev", () => {
+  test("uses tsconfig.dev.json by default", () => {
+    const prj = new TypeScriptProject({
+      name: "test",
+      projenrcTs: true,
+      defaultReleaseBranch: "main",
+    });
+
+    const snapshot = synthSnapshot(prj);
+    expect(prj.tsconfigDev.fileName).toBe("tsconfig.dev.json");
+    expect(snapshot["tsconfig.json"]).not.toBeUndefined();
+    expect(snapshot["tsconfig.dev.json"]).not.toBeUndefined();
+    expect(snapshot[".projen/tasks.json"].tasks.default).toStrictEqual(
+      expect.objectContaining({
+        steps: [{ exec: "ts-node --project tsconfig.dev.json .projenrc.ts" }],
+      })
+    );
+  });
+
+  test("uses tsconfig.json when disableTsconfigDev is passed", () => {
+    const prj = new TypeScriptProject({
+      name: "test",
+      projenrcTs: true,
+      defaultReleaseBranch: "main",
+      disableTsconfigDev: true,
+    });
+
+    const snapshot = synthSnapshot(prj);
+    expect(prj.tsconfigDev.fileName).toBe("tsconfig.json");
+    expect(snapshot["tsconfig.json"]).not.toBeUndefined();
+    expect(snapshot["tsconfig.dev.json"]).toBeUndefined();
+    expect(snapshot[".projen/tasks.json"].tasks.default).toStrictEqual(
+      expect.objectContaining({
+        steps: [{ exec: "ts-node --project tsconfig.json .projenrc.ts" }],
+      })
+    );
+  });
+
+  test("throw error when both disableTsconfig and disableTsconfigDev is passed", () => {
+    expect(
+      () =>
+        new TypeScriptProject({
+          name: "test",
+          projenrcTs: true,
+          defaultReleaseBranch: "main",
+          disableTsconfig: true,
+          disableTsconfigDev: true,
+        })
+    ).toThrow(
+      "Cannot specify both 'disableTsconfigDev' and 'disableTsconfig' fields."
+    );
+  });
 });

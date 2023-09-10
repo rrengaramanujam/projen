@@ -1,8 +1,9 @@
+import * as fs from "fs";
 import * as path from "path";
-import * as fs from "fs-extra";
-import { Project, TextFile, ProjectOptions, JsonFile } from "../src";
-import { PROJEN_MARKER } from "../src/common";
 import { synthSnapshot, TestProject } from "./util";
+import { Project, TextFile, ProjectOptions, JsonFile, Component } from "../src";
+import { PROJEN_MARKER } from "../src/common";
+import { GitHubProject } from "../src/github";
 
 test("composing projects declaratively", () => {
   const comp = new TestProject();
@@ -38,12 +39,12 @@ test("composing projects synthesizes to subdirs", () => {
   comp.synth();
 
   // THEN
-  expect(fs.pathExistsSync(path.join(comp.outdir, "README.md")));
+  expect(fs.existsSync(path.join(comp.outdir, "README.md")));
   expect(
-    fs.pathExistsSync(path.join(comp.outdir, "packages", "foo", ".gitignore"))
+    fs.existsSync(path.join(comp.outdir, "packages", "foo", ".gitignore"))
   );
   expect(
-    fs.pathExistsSync(path.join(comp.outdir, "packages", "bar", ".gitignore"))
+    fs.existsSync(path.join(comp.outdir, "packages", "bar", ".gitignore"))
   );
 });
 
@@ -136,10 +137,80 @@ test("subproject generated json files can be synthed", () => {
 
   const out = synthSnapshot(root);
   expect(out["sub-project/test.jsonc"]).toMatchInlineSnapshot(`
-    Object {
+    {
       "test": "data",
     }
   `);
+});
+
+test("subprojects do not add a Projenrc component", () => {
+  // GIVEN
+  const parent = new TestProject();
+
+  const child = new TestProject({
+    parent,
+    outdir: "sub",
+    projenrcJson: true,
+  });
+
+  // THEN
+  const rcFiles = child.components.filter((o: Component) =>
+    o.constructor.name.toLowerCase().includes("projenrc")
+  );
+  expect(rcFiles.length).toBe(0);
+});
+
+test("subprojects use root level default task", () => {
+  // GIVEN
+  const root = new TestProject();
+
+  const childOne = new TestProject({
+    parent: root,
+    outdir: "one",
+  });
+
+  new TestProject({
+    parent: childOne,
+    outdir: "two",
+  });
+
+  // THEN
+  const out = synthSnapshot(root);
+  expect(out["one/.projen/tasks.json"]).toMatchSnapshot();
+  expect(out["one/.projen/tasks.json"].tasks.default.steps).toEqual([
+    {
+      cwd: "..",
+      exec: "npx projen default",
+    },
+  ]);
+  expect(out["one/two/.projen/tasks.json"]).toMatchSnapshot();
+  expect(out["one/two/.projen/tasks.json"].tasks.default.steps).toEqual([
+    {
+      cwd: "../..",
+      exec: "npx projen default",
+    },
+  ]);
+});
+
+test("files are annotated as generated on subproject", () => {
+  // GIVEN
+
+  // Currently `Project` has an empty implementation of `annotateGenerated`,
+  // so we use `GitHubProject` to observe the resulting `.gitattributes`
+  const parent = new GitHubProject({ name: "parent" });
+  const child = new GitHubProject({
+    parent,
+    name: "child",
+    outdir: path.join("packages", "child"),
+  });
+
+  // WHEN
+  new TextFile(child, "file.txt", { lines: ["Content"] });
+
+  // THEN
+  const out = synthSnapshot(parent);
+  expect(out[".gitattributes"].includes("file.txt")).toBe(false);
+  expect(out["packages/child/.gitattributes"].includes("file.txt")).toBe(true);
 });
 
 // a project that depends on generated files during preSynthesize()

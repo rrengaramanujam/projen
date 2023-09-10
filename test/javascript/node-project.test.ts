@@ -1,15 +1,17 @@
 import * as yaml from "yaml";
+import { Component } from "../../src";
 import { PROJEN_MARKER } from "../../src/common";
 import { DependencyType } from "../../src/dependencies";
 import { GithubCredentials } from "../../src/github";
 import { secretToString } from "../../src/github/util";
 import { JobPermission } from "../../src/github/workflows-model";
 import {
+  CodeArtifactAuthProvider,
+  NodePackage,
+  NodePackageManager,
   NodeProject,
   NodeProjectOptions,
-  NodePackage,
   NpmAccess,
-  CodeArtifactAuthProvider,
 } from "../../src/javascript";
 import { JsonFile } from "../../src/json";
 import * as logging from "../../src/logging";
@@ -725,6 +727,18 @@ describe("scripts", () => {
     expect(pkg.scripts).not.toHaveProperty("chortle");
     expect(pkg.scripts).not.toHaveProperty("slithy-toves");
   });
+
+  test("addScripts will add multiple scripts", () => {
+    const p = new TestNodeProject();
+
+    p.addScripts({
+      "slithy-toves": "gyre && gimble",
+      chortle: 'echo "frabjous day!"',
+    });
+    const pkg = packageJson(p);
+    expect(pkg.scripts).toHaveProperty("slithy-toves");
+    expect(pkg.scripts).toHaveProperty("chortle");
+  });
 });
 
 test("mutableBuild will push changes to PR branches", () => {
@@ -788,6 +802,20 @@ test("projen synth is only executed for subprojects", () => {
       { spawn: "package" },
     ],
   });
+});
+
+test("javascript subprojects do not add a Projenrc component", () => {
+  // GIVEN
+  const root = new TestNodeProject();
+
+  // WHEN
+  const child = new TestNodeProject({ parent: root, outdir: "child" });
+
+  // THEN
+  const rcFiles = child.components.filter((o: Component) =>
+    o.constructor.name.toLowerCase().includes("projenrc")
+  );
+  expect(rcFiles.length).toBe(0);
 });
 
 test("enabling dependabot does not overturn mergify: false", () => {
@@ -952,6 +980,114 @@ test("workflowGitIdentity can be used to customize the git identity used in buil
   });
 });
 
+describe("Setup pnpm", () => {
+  const setupPnpmIndex = (job: any) =>
+    job.steps.findIndex((step: any) => step.name === "Setup pnpm");
+  const setupNodeIndex = (job: any) =>
+    job.steps.findIndex((step: any) => step.name === "Setup Node.js");
+
+  test("Setup pnpm should not run without pnpm option", () => {
+    // WHEN
+    const options = {};
+    const project = new TestNodeProject(options);
+
+    // THEN
+    const output = synthSnapshot(project);
+    const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
+    expect(setupPnpmIndex(buildWorkflow.jobs.build)).toEqual(-1);
+    const releaseWorkflow = yaml.parse(output[".github/workflows/release.yml"]);
+    expect(setupPnpmIndex(releaseWorkflow.jobs.release)).toEqual(-1);
+    const upgradeWorkflow = yaml.parse(
+      output[".github/workflows/upgrade-main.yml"]
+    );
+    expect(setupPnpmIndex(upgradeWorkflow.jobs.upgrade)).toEqual(-1);
+  });
+
+  test("Setup pnpm should run before Setup Node.js", () => {
+    // WHEN
+    const options = {
+      workflowPackageCache: true,
+      packageManager: NodePackageManager.PNPM,
+    };
+    const project = new TestNodeProject(options);
+
+    // THEN
+    const output = synthSnapshot(project);
+    const buildJob = yaml.parse(output[".github/workflows/build.yml"]).jobs
+      .build;
+    expect(setupPnpmIndex(buildJob)).toBeGreaterThanOrEqual(0);
+    expect(setupPnpmIndex(buildJob)).toBeLessThan(setupNodeIndex(buildJob));
+    const releaseJob = yaml.parse(output[".github/workflows/release.yml"]).jobs
+      .release;
+    expect(setupPnpmIndex(releaseJob)).toBeGreaterThanOrEqual(0);
+    expect(setupPnpmIndex(releaseJob)).toBeLessThan(setupNodeIndex(releaseJob));
+    const upgradeJob = yaml.parse(output[".github/workflows/upgrade-main.yml"])
+      .jobs.upgrade;
+    expect(setupPnpmIndex(upgradeJob)).toBeGreaterThanOrEqual(0);
+    expect(setupPnpmIndex(upgradeJob)).toBeLessThan(setupNodeIndex(upgradeJob));
+  });
+});
+
+describe("workflowPackageCache", () => {
+  const cache = (job: any) =>
+    job.steps.find((step: any) => step.name === "Setup Node.js")?.with?.cache;
+
+  test.each([
+    { name: "default to false", options: {}, expected: undefined },
+    {
+      name: "only nodeVersion to be disabled",
+      options: { workflowNodeVersion: "18" },
+      expected: undefined,
+    },
+    {
+      name: "npm to be enabled",
+      options: {
+        workflowPackageCache: true,
+        packageManager: NodePackageManager.NPM,
+      },
+      expected: "npm",
+    },
+    {
+      name: "yarn to be enabled",
+      options: {
+        workflowPackageCache: true,
+        packageManager: NodePackageManager.YARN,
+      },
+      expected: "yarn",
+    },
+    {
+      name: "yarn2 to be enabled",
+      options: {
+        workflowPackageCache: true,
+        packageManager: NodePackageManager.YARN2,
+      },
+      expected: "yarn",
+    },
+    {
+      name: "pnpm to be enabled",
+      options: {
+        workflowPackageCache: true,
+        packageManager: NodePackageManager.PNPM,
+      },
+      expected: "pnpm",
+    },
+  ])("$name", ({ options, expected }) => {
+    // WHEN
+    const project = new TestNodeProject(options);
+
+    // THEN
+    const output = synthSnapshot(project);
+    const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
+    expect(cache(buildWorkflow.jobs.build)).toEqual(expected);
+    const releaseWorkflow = yaml.parse(output[".github/workflows/release.yml"]);
+    expect(cache(releaseWorkflow.jobs.release)).toEqual(expected);
+    const upgradeWorkflow = yaml.parse(
+      output[".github/workflows/upgrade-main.yml"]
+    );
+    expect(cache(upgradeWorkflow.jobs.upgrade)).toEqual(expected);
+  });
+});
+
 describe("workflowRunsOn", () => {
   test("default to ubuntu-latest", () => {
     // WHEN
@@ -979,6 +1115,33 @@ describe("workflowRunsOn", () => {
     expect(buildWorkflow.jobs["self-mutation"]["runs-on"]).toEqual(
       "self-hosted"
     );
+  });
+
+  test("use github runner group specified in workflowRunsOn", () => {
+    // WHEN
+    const project = new TestNodeProject({
+      workflowRunsOnGroup: {
+        group: "Default",
+        labels: ["self-hosted", "linux", "x64"],
+      },
+    });
+
+    // THEN
+    const output = synthSnapshot(project);
+    const build = yaml.parse(output[".github/workflows/build.yml"]);
+
+    expect(build).toHaveProperty("jobs.build.runs-on.group", "Default");
+    expect(build).toHaveProperty("jobs.build.runs-on.labels", [
+      "self-hosted",
+      "linux",
+      "x64",
+    ]);
+    expect(build).toHaveProperty("jobs.self-mutation.runs-on.group", "Default");
+    expect(build).toHaveProperty("jobs.self-mutation.runs-on.labels", [
+      "self-hosted",
+      "linux",
+      "x64",
+    ]);
   });
 });
 
@@ -1058,6 +1221,16 @@ test("node project can be ejected", () => {
   expect(outdir[".projen/files.json"]).toBeUndefined();
 });
 
+class TestNodeProject extends NodeProject {
+  constructor(options: Partial<NodeProjectOptions> = {}) {
+    super({
+      name: "test-node-project",
+      defaultReleaseBranch: "main",
+      ...options,
+    });
+  }
+}
+
 describe("scoped private packages", () => {
   const accountId = "123456789012";
   const domain = "my-domain";
@@ -1066,10 +1239,11 @@ describe("scoped private packages", () => {
   const scope = "@stub-scope";
   const defaultAccessKeyIdSecret = "AWS_ACCESS_KEY_ID";
   const defaultSecretAccessKeySecret = "AWS_SECRET_ACCESS_KEY";
+  const roleToAssume = `stub-role-to-assume`;
   const registry = `${domain}-${accountId}.d.codeartifact.${region}.amazonaws.com/npm/${repository}/`;
   const registryUrl = `https://${registry}`;
 
-  test("adds AWS Code Artifact Login step prior to install to build workflow", () => {
+  describe("Auth Provider ACCESS_AND_SECRET_KEY_PAIR", () => {
     const project = new TestNodeProject({
       scopedPackagesOptions: [
         {
@@ -1080,23 +1254,72 @@ describe("scoped private packages", () => {
     });
     const output = synthSnapshot(project);
 
-    const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
-    expect(buildWorkflow.jobs.build.steps).toEqual(
-      expect.arrayContaining([
-        {
-          name: "AWS CodeArtifact Login",
-          run: "yarn run ca:login",
-          env: {
-            AWS_ACCESS_KEY_ID: secretToString(defaultAccessKeyIdSecret),
-            AWS_SECRET_ACCESS_KEY: secretToString(defaultSecretAccessKeySecret),
+    test("adds AWS Code Artifact Login step prior to install to build workflow", () => {
+      const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
+      expect(buildWorkflow.jobs.build.steps).toEqual(
+        expect.arrayContaining([
+          {
+            name: "AWS CodeArtifact Login",
+            run: "yarn run ca:login",
+            env: {
+              AWS_ACCESS_KEY_ID: secretToString(defaultAccessKeyIdSecret),
+              AWS_SECRET_ACCESS_KEY: secretToString(
+                defaultSecretAccessKeySecret
+              ),
+            },
           },
-        },
-        { name: "Install dependencies", run: "yarn install --check-files" },
-      ])
-    );
+          { name: "Install dependencies", run: "yarn install --check-files" },
+        ])
+      );
+    });
+
+    test("does not add id-token permission to build workflow", () => {
+      const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
+      expect(Object.keys(buildWorkflow.jobs.build.permissions)).not.toContain(
+        "id-token"
+      );
+    });
+
+    test("adds AWS Code Artifact Login step prior to install to release workflow", () => {
+      const releaseWorkflow = yaml.parse(
+        output[".github/workflows/release.yml"]
+      );
+      expect(releaseWorkflow.jobs.release.steps).toEqual(
+        expect.arrayContaining([
+          {
+            name: "AWS CodeArtifact Login",
+            run: "yarn run ca:login",
+            env: {
+              AWS_ACCESS_KEY_ID: secretToString(defaultAccessKeyIdSecret),
+              AWS_SECRET_ACCESS_KEY: secretToString(
+                defaultSecretAccessKeySecret
+              ),
+            },
+          },
+          {
+            name: "Install dependencies",
+            run: "yarn install --check-files --frozen-lockfile",
+          },
+        ])
+      );
+    });
+
+    test("does not add id-token permission to release workflow", () => {
+      const workflow = yaml.parse(output[".github/workflows/release.yml"]);
+      expect(Object.keys(workflow.jobs.release.permissions)).not.toContain(
+        "id-token"
+      );
+    });
+
+    test("does not add id-token permission to upgrade workflow", () => {
+      const workflow = yaml.parse(output[".github/workflows/upgrade-main.yml"]);
+      expect(Object.keys(workflow.jobs.upgrade.permissions)).not.toContain(
+        "id-token"
+      );
+    });
   });
 
-  test("adds AWS Code Artifact Login step prior to install to release workflow", () => {
+  describe("Auth Provider GITHUB_OIDC", () => {
     const project = new TestNodeProject({
       scopedPackagesOptions: [
         {
@@ -1104,25 +1327,92 @@ describe("scoped private packages", () => {
           scope,
         },
       ],
+      codeArtifactOptions: {
+        authProvider: CodeArtifactAuthProvider.GITHUB_OIDC,
+        roleToAssume,
+      },
     });
     const output = synthSnapshot(project);
-    const releaseWorkflow = yaml.parse(output[".github/workflows/release.yml"]);
-    expect(releaseWorkflow.jobs.release.steps).toEqual(
-      expect.arrayContaining([
-        {
-          name: "AWS CodeArtifact Login",
-          run: "yarn run ca:login",
-          env: {
-            AWS_ACCESS_KEY_ID: secretToString(defaultAccessKeyIdSecret),
-            AWS_SECRET_ACCESS_KEY: secretToString(defaultSecretAccessKeySecret),
+
+    test("adds AWS Code Artifact Login step prior to install to build workflow", () => {
+      const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
+      expect(buildWorkflow.jobs.build.steps).toEqual(
+        expect.arrayContaining([
+          {
+            name: "Configure AWS Credentials",
+            uses: "aws-actions/configure-aws-credentials@v2",
+            with: {
+              "aws-region": "us-east-2",
+              "role-to-assume": roleToAssume,
+              "role-duration-seconds": 900,
+            },
           },
-        },
-        {
-          name: "Install dependencies",
-          run: "yarn install --check-files --frozen-lockfile",
-        },
-      ])
-    );
+          {
+            name: "AWS CodeArtifact Login",
+            run: "yarn run ca:login",
+          },
+          {
+            name: "Install dependencies",
+            run: "yarn install --check-files",
+          },
+        ])
+      );
+    });
+
+    test("adds id-token permission to build workflow", () => {
+      const buildWorkflow = yaml.parse(output[".github/workflows/build.yml"]);
+      expect(buildWorkflow.jobs.build.permissions).toEqual(
+        expect.objectContaining({
+          "id-token": "write",
+        })
+      );
+    });
+
+    test("adds AWS Code Artifact Login step prior to install to release workflow", () => {
+      const releaseWorkflow = yaml.parse(
+        output[".github/workflows/release.yml"]
+      );
+      expect(releaseWorkflow.jobs.release.steps).toEqual(
+        expect.arrayContaining([
+          {
+            name: "Configure AWS Credentials",
+            uses: "aws-actions/configure-aws-credentials@v2",
+            with: {
+              "aws-region": "us-east-2",
+              "role-to-assume": roleToAssume,
+              "role-duration-seconds": 900,
+            },
+          },
+          {
+            name: "AWS CodeArtifact Login",
+            run: "yarn run ca:login",
+          },
+          {
+            name: "Install dependencies",
+            run: "yarn install --check-files --frozen-lockfile",
+          },
+        ])
+      );
+    });
+
+    test("adds id-token permission to release workflow", () => {
+      const workflow = yaml.parse(output[".github/workflows/release.yml"]);
+      expect(workflow.jobs.release.permissions).toEqual(
+        expect.objectContaining({
+          "id-token": "write",
+        })
+      );
+    });
+
+    test("adds id-token permission to upgrade workflow", () => {
+      const workflow = yaml.parse(output[".github/workflows/upgrade-main.yml"]);
+      expect(workflow.jobs.upgrade.permissions).toEqual(
+        expect.objectContaining({
+          "id-token": "write",
+          contents: "read",
+        })
+      );
+    });
   });
 
   test("adds AWS Code Artifact Login step prior to install to workflow when multiple scoped packages defined", () => {
@@ -1200,7 +1490,6 @@ describe("scoped private packages", () => {
   });
 
   test("adds AWS assume role and Code Artifact Login step prior to install to workflow", () => {
-    const roleToAssume = `stub-role-to-assume`;
     const project = new TestNodeProject({
       scopedPackagesOptions: [
         {
@@ -1218,7 +1507,7 @@ describe("scoped private packages", () => {
       expect.arrayContaining([
         {
           name: "Configure AWS Credentials",
-          uses: "aws-actions/configure-aws-credentials@v1",
+          uses: "aws-actions/configure-aws-credentials@v2",
           with: {
             "aws-access-key-id": secretToString(defaultAccessKeyIdSecret),
             "aws-secret-access-key": secretToString(
@@ -1296,6 +1585,33 @@ describe("scoped private packages", () => {
     });
   });
 
+  test("adds ca:login script without always-auth when min node version is greater than 16", () => {
+    const project = new TestNodeProject({
+      scopedPackagesOptions: [
+        {
+          registryUrl,
+          scope,
+        },
+      ],
+      minNodeVersion: "18.11.0",
+    });
+    const output = synthSnapshot(project);
+
+    const tasks = output[TaskRuntime.MANIFEST_FILE].tasks;
+    expect(tasks["ca:login"]).toEqual({
+      name: "ca:login",
+      requiredEnv: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+      steps: [
+        {
+          exec: "which aws",
+        },
+        {
+          exec: `npm config set ${scope}:registry ${registryUrl}; CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain ${domain} --region ${region} --domain-owner ${accountId} --query authorizationToken --output text); npm config set //${registry}:_authToken=$CODEARTIFACT_AUTH_TOKEN`,
+        },
+      ],
+    });
+  });
+
   test("adds ca:login script when multiple scoped packages defined", () => {
     const accountId2 = "123456789013";
     const domain2 = "my-domain-2";
@@ -1337,12 +1653,53 @@ describe("scoped private packages", () => {
   });
 });
 
-class TestNodeProject extends NodeProject {
-  constructor(options: Partial<NodeProjectOptions> = {}) {
-    super({
-      name: "test-node-project",
-      defaultReleaseBranch: "main",
-      ...options,
+test("sets resolution-mode to highest by default for pnpm", () => {
+  const project = new TestNodeProject({
+    packageManager: NodePackageManager.PNPM,
+  });
+
+  const output = synthSnapshot(project);
+  expect(output[".npmrc"]).toContain("resolution-mode=highest");
+});
+
+test("can override resolution-mode to lowest for pnpm", () => {
+  const project = new TestNodeProject({
+    packageManager: NodePackageManager.PNPM,
+  });
+  project.npmrc.addConfig("resolution-mode", "lowest");
+
+  const output = synthSnapshot(project);
+  expect(output[".npmrc"]).toContain("resolution-mode=lowest");
+  expect(output[".npmrc"]).not.toContain("resolution-mode=highest");
+});
+
+describe("package manager env", () => {
+  [
+    {
+      packageManager: NodePackageManager.NPM,
+      cmd: '$(npx -c "node --print process.env.PATH")',
+    },
+    {
+      packageManager: NodePackageManager.YARN,
+      cmd: '$(npx -c "node --print process.env.PATH")',
+    },
+    {
+      packageManager: NodePackageManager.YARN2,
+      cmd: '$(npx -c "node --print process.env.PATH")',
+    },
+    {
+      packageManager: NodePackageManager.PNPM,
+      cmd: '$(pnpm -c exec "node --print process.env.PATH")',
+    },
+  ].forEach((testCase) => {
+    test(testCase.packageManager, () => {
+      // GIVEN / WHEN
+      const project = new TestNodeProject({
+        packageManager: testCase.packageManager,
+      });
+
+      // THEN
+      expect(project.tasks.env.PATH).toEqual(testCase.cmd);
     });
-  }
-}
+  });
+});

@@ -1,5 +1,7 @@
 // @see https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
 
+import { GroupRunnerOptions } from "../runner-options";
+
 export interface CommonJobDefinition {
   /**
    * The name of the job displayed on GitHub.
@@ -45,6 +47,12 @@ export interface CommonJobDefinition {
    * create a conditional.
    */
   readonly if?: string;
+
+  /**
+   * A strategy creates a build matrix for your jobs. You can define different
+   * variations to run each job in.
+   */
+  readonly strategy?: JobStrategy;
 }
 
 /**
@@ -84,7 +92,14 @@ export interface Job extends CommonJobDefinition {
    *
    * @example ["ubuntu-latest"]
    */
-  readonly runsOn: string[];
+  readonly runsOn?: string[];
+
+  /**
+   * Github Runner Group selection options
+   * @description Defines a target Runner Group by name and/or labels
+   * @throws {Error} if both `runsOn` and `runsOnGroup` are specified
+   */
+  readonly runsOnGroup?: GroupRunnerOptions;
 
   /**
    * A job contains a sequence of tasks called steps. Steps can run commands,
@@ -132,12 +147,6 @@ export interface Job extends CommonJobDefinition {
    * @default 360
    */
   readonly timeoutMinutes?: number;
-
-  /**
-   * A strategy creates a build matrix for your jobs. You can define different
-   * variations to run each job in.
-   */
-  readonly strategy?: JobStrategy;
 
   /**
    * Prevents a workflow run from failing when a job fails. Set to true to
@@ -233,6 +242,51 @@ export interface JobPermissions {
 }
 
 /**
+ * The permissions available to a GitHub App.
+ *
+ * Typically a token for a GitHub App has all the available scopes/permissions available to the app
+ * itself; however, a more limited set of permissions can be specified. When permissions are provided,
+ * **only** the specified permissions are granted to the token.
+ *
+ * @see https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
+ */
+export interface AppPermissions {
+  readonly actions?: AppPermission;
+  readonly administration?: AppPermission;
+  readonly checks?: AppPermission;
+  readonly contents?: AppPermission;
+  readonly deployments?: AppPermission;
+  readonly environments?: AppPermission;
+  readonly issues?: AppPermission;
+  readonly metadata?: AppPermission;
+  readonly packages?: AppPermission;
+  readonly pages?: AppPermission;
+  readonly pullRequests?: AppPermission;
+  readonly repositoryAnnouncementBanners?: AppPermission;
+  readonly repositoryHooks?: AppPermission;
+  readonly repositoryProject?: AppPermission;
+  readonly secretScanningAlerts?: AppPermission;
+  readonly secrets?: AppPermission;
+  readonly securityEvents?: AppPermission;
+  readonly singleFile?: AppPermission;
+  readonly statuses?: AppPermission;
+  readonly vulnerabilityAlerts?: AppPermission;
+  readonly workflows?: AppPermission;
+  readonly members?: AppPermission;
+  readonly organizationAdministration?: AppPermission;
+  readonly organizationCustomRoles?: AppPermission;
+  readonly organizationAnnouncementBanners?: AppPermission;
+  readonly organizationHooks?: AppPermission;
+  readonly organizationPlan?: AppPermission;
+  readonly organizationProjects?: AppPermission;
+  readonly organizationPackages?: AppPermission;
+  readonly organizationSecrets?: AppPermission;
+  readonly organizationSelfHostedRunners?: AppPermission;
+  readonly orgnaizationUserBlocking?: AppPermission;
+  readonly teamDiscussions?: AppPermission;
+}
+
+/**
  * Access level for workflow permission scopes.
  */
 export enum JobPermission {
@@ -244,6 +298,22 @@ export enum JobPermission {
 
   /** No access at all */
   NONE = "none",
+}
+
+/**
+ * The permissions available for an access token for a GitHub App.
+ */
+export enum AppPermission {
+  /** Read-only acccess */
+  READ = "read",
+  /** Read-write access */
+  WRITE = "write",
+  /**
+   * Read-write and admin access.
+   *
+   * Not all permissions support `admin`.
+   */
+  ADMIN = "admin",
 }
 
 /**
@@ -607,6 +677,14 @@ export interface Triggers {
   readonly label?: LabelOptions;
 
   /**
+   * Runs your workflow when a pull request is added to a merge queue, which
+   * adds the pull request to a merge group.
+   *
+   * @stability experimental
+   */
+  readonly mergeGroup?: MergeGroupOptions;
+
+  /**
    * Runs your workflow anytime the milestone event occurs.
    */
   readonly milestone?: MilestoneOptions;
@@ -851,7 +929,7 @@ export interface IssuesOptions {
 }
 
 /**
- * label options
+ * Label options
  */
 export interface LabelOptions {
   /**
@@ -860,6 +938,20 @@ export interface LabelOptions {
    * @defaults - all activity types
    */
   readonly types?: Array<"created" | "edited" | "deleted">;
+}
+
+/**
+ * Merge group options.
+ *
+ * @stability experimental
+ */
+export interface MergeGroupOptions {
+  /**
+   * When using the merge_group events, you can configure a workflow
+   * to run on specific base branches. If not specified, all branches will
+   * trigger the workflow.
+   */
+  readonly branches?: string[];
 }
 
 /**
@@ -919,7 +1011,7 @@ export interface ProjectColumnOptions {
 /**
  * Pull request options
  */
-export interface PullRequestOptions {
+export interface PullRequestOptions extends PushOptions {
   /**
    * Which activity types to trigger on.
    *
@@ -999,7 +1091,7 @@ export interface PullRequestTargetOptions extends PushOptions {
  */
 export interface PushOptions {
   /**
-   * When using the push and pull_request events, you can configure a workflow
+   * When using the push, pull_request and pull_request_target events, you can configure a workflow
    * to run on specific branches or tags. For a pull_request event, only
    * branches and tags on the base are evaluated. If you define only tags or
    * only branches, the workflow won't run for events affecting the undefined
@@ -1010,7 +1102,7 @@ export interface PushOptions {
   readonly branches?: string[];
 
   /**
-   * When using the push and pull_request events, you can configure a workflow
+   * When using the push, pull_request and pull_request_target events, you can configure a workflow
    * to run on specific branches or tags. For a pull_request event, only
    * branches and tags on the base are evaluated. If you define only tags or
    * only branches, the workflow won't run for events affecting the undefined
@@ -1021,7 +1113,7 @@ export interface PushOptions {
   readonly tags?: string[];
 
   /**
-   * When using the push and pull_request events, you can configure a workflow
+   * When using the push, pull_request and pull_request_target events, you can configure a workflow
    * to run when at least one file does not match paths-ignore or at least one
    * modified file matches the configured paths. Path filters are not
    * evaluated for pushes to tags.

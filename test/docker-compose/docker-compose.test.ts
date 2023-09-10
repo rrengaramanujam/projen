@@ -1,9 +1,9 @@
 import * as child_process from "child_process";
+import * as fs from "fs";
 import * as path from "path";
-import * as fs from "fs-extra";
-import { DockerCompose, DockerComposeProtocol } from "../src";
-import * as logging from "../src/logging";
-import { TestProject } from "./util";
+import { DockerCompose, DockerComposeProtocol, YamlFile } from "../../src/";
+import * as logging from "../../src/logging";
+import { TestProject } from "../util";
 
 logging.disable();
 
@@ -51,6 +51,22 @@ describe("docker-compose", () => {
           },
         })
     ).toThrow(/Version tag needs to be a number/i);
+  });
+
+  test("exposes file as property", () => {
+    const project = new TestProject();
+
+    const dc = new DockerCompose(project, {
+      schemaVersion: "3.1",
+      services: {
+        myservice: {
+          image: "nginx",
+        },
+      },
+    });
+
+    expect(dc.file).toBeInstanceOf(YamlFile);
+    expect(dc.file.path).toEqual("docker-compose.yml");
   });
 
   test("version tag explicit set and created as float", () => {
@@ -167,7 +183,7 @@ describe("docker-compose", () => {
 
   test("can choose a name suffix for the docker-compose.yml", () => {
     const project = new TestProject();
-    new DockerCompose(project, {
+    const dc = new DockerCompose(project, {
       nameSuffix: "myname",
       services: {
         myservice: {
@@ -177,6 +193,7 @@ describe("docker-compose", () => {
     });
 
     project.synth();
+    expect(dc.file.path).toEqual("docker-compose.myname.yml");
     expect(
       fs.existsSync(path.join(project.outdir, "docker-compose.myname.yml"))
     );
@@ -199,6 +216,31 @@ describe("docker-compose", () => {
         alpine: {
           image: "alpine",
           command: ["sh", "-c", "echo I ran"],
+        },
+      },
+    });
+
+    project.synth();
+    assertDockerComposeFileValidates(project.outdir);
+  });
+
+  test("can add a container entrypoint", () => {
+    const project = new TestProject();
+    const dc = new DockerCompose(project, {
+      services: {
+        alpine: {
+          image: "alpine",
+          entrypoint: ["sh"],
+        },
+      },
+    });
+
+    expect(dc._synthesizeDockerCompose()).toEqual({
+      version: "3.3",
+      services: {
+        alpine: {
+          image: "alpine",
+          entrypoint: ["sh"],
         },
       },
     });
@@ -517,6 +559,154 @@ describe("docker-compose", () => {
     });
   });
 
+  describe("can add a network", () => {
+    test("declaratively", () => {
+      const project = new TestProject();
+      const dc = new DockerCompose(project, {
+        services: {
+          myservice: {
+            image: "nginx",
+            networks: [DockerCompose.network("webapp")],
+          },
+        },
+      });
+
+      expect(dc._synthesizeDockerCompose()).toEqual({
+        version: "3.3",
+        services: {
+          myservice: {
+            image: "nginx",
+            networks: ["webapp"],
+          },
+        },
+        networks: {
+          webapp: {},
+        },
+      });
+
+      project.synth();
+      assertDockerComposeFileValidates(project.outdir);
+    });
+
+    test("imperatively", () => {
+      const project = new TestProject();
+      const dc = new DockerCompose(project);
+
+      const service = dc.addService("myservice", {
+        image: "nginx",
+      });
+      service.addNetwork(
+        DockerCompose.network("webapp", {
+          attachable: true,
+          driver: "bridge",
+          driverOpts: {
+            test: "123",
+          },
+          labels: ["label1=value1"],
+          internal: true,
+          ipam: {
+            driver: "default",
+            config: [
+              {
+                subnet: "172.28.0.0/16",
+              },
+            ],
+          },
+          name: "webapp",
+        })
+      );
+
+      expect(dc._synthesizeDockerCompose()).toEqual({
+        version: "3.3",
+        services: {
+          myservice: {
+            image: "nginx",
+            networks: ["webapp"],
+          },
+        },
+        networks: {
+          webapp: {
+            attachable: true,
+            driver: "bridge",
+            driver_opts: {
+              test: "123",
+            },
+            labels: ["label1=value1"],
+            internal: true,
+            ipam: {
+              driver: "default",
+              config: [
+                {
+                  subnet: "172.28.0.0/16",
+                },
+              ],
+            },
+            name: "webapp",
+          },
+        },
+      });
+
+      project.synth();
+      assertDockerComposeFileValidates(project.outdir);
+    });
+  });
+
+  describe("can add a label", () => {
+    test("declaratively", () => {
+      const project = new TestProject();
+      const dc = new DockerCompose(project, {
+        services: {
+          myservice: {
+            image: "nginx",
+            labels: {
+              myLabel: "myvalue",
+            },
+          },
+        },
+      });
+
+      expect(dc._synthesizeDockerCompose()).toEqual({
+        version: "3.3",
+        services: {
+          myservice: {
+            image: "nginx",
+            labels: {
+              myLabel: "myvalue",
+            },
+          },
+        },
+      });
+
+      project.synth();
+      assertDockerComposeFileValidates(project.outdir);
+    });
+
+    test("imperatively", () => {
+      const project = new TestProject();
+      const dc = new DockerCompose(project);
+
+      const service = dc.addService("myservice", {
+        image: "nginx",
+      });
+      service.addLabel("my.label", "my_value");
+
+      expect(dc._synthesizeDockerCompose()).toEqual({
+        version: "3.3",
+        services: {
+          myservice: {
+            image: "nginx",
+            labels: {
+              "my.label": "my_value",
+            },
+          },
+        },
+      });
+
+      project.synth();
+      assertDockerComposeFileValidates(project.outdir);
+    });
+  });
+
   test("errors when a service reference by name does not exist", () => {
     const project = new TestProject();
 
@@ -734,6 +924,32 @@ describe("docker-compose", () => {
       );
 
       expect(dc._synthesizeDockerCompose()).toEqual(expected);
+
+      project.synth();
+      assertDockerComposeFileValidates(project.outdir);
+    });
+  });
+  describe("can add a platform", () => {
+    test("declaratively", () => {
+      const project = new TestProject();
+      const dc = new DockerCompose(project, {
+        services: {
+          myservice: {
+            image: "nginx",
+            platform: "linux/amd64",
+          },
+        },
+      });
+
+      expect(dc._synthesizeDockerCompose()).toEqual({
+        version: "3.3",
+        services: {
+          myservice: {
+            image: "nginx",
+            platform: "linux/amd64",
+          },
+        },
+      });
 
       project.synth();
       assertDockerComposeFileValidates(project.outdir);

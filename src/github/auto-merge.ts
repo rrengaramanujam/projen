@@ -1,5 +1,5 @@
-import { Component } from "../component";
 import { GitHub } from "./github";
+import { Component } from "../component";
 
 export interface AutoMergeOptions {
   /**
@@ -71,6 +71,7 @@ export class AutoMerge extends Component {
 
     mergify.addQueue({
       name: "default",
+      updateMethod: "merge",
       conditions: (() => this.renderConditions()) as any,
     });
 

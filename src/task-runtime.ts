@@ -4,10 +4,10 @@ import { platform } from "os";
 import { dirname, join, resolve } from "path";
 import * as path from "path";
 import { format } from "util";
-import * as chalk from "chalk";
+import { gray, underline } from "chalk";
 import { PROJEN_DIR } from "./common";
 import * as logging from "./logging";
-import { TasksManifest, TaskSpec } from "./task-model";
+import { TasksManifest, TaskSpec, TaskStep } from "./task-model";
 
 const ENV_TRIM_LEN = 20;
 const ARGS_MARKER = "$@";
@@ -94,9 +94,7 @@ class RunTask {
     this.parents = parents;
 
     if (!task.steps || task.steps.length === 0) {
-      this.logDebug(
-        chalk.gray("No actions have been specified for this task.")
-      );
+      this.logDebug(gray("No actions have been specified for this task."));
       return;
     }
 
@@ -111,9 +109,7 @@ class RunTask {
     }
 
     if (envlogs.length) {
-      this.logDebug(
-        chalk.gray(`${chalk.underline("env")}: ${envlogs.join(" ")}`)
-      );
+      this.logDebug(gray(`${underline("env")}: ${envlogs.join(" ")}`));
     }
 
     // evaluate condition
@@ -138,6 +134,17 @@ class RunTask {
     }
 
     for (const step of task.steps) {
+      // evaluate step condition
+      if (!this.evalCondition(step)) {
+        this.log("condition exited with non-zero - skipping");
+        continue;
+      }
+
+      const argsList: string[] = [
+        ...(step.args || []),
+        ...(step.receiveArgs ? args : []),
+      ].map((a) => a.toString());
+
       if (step.say) {
         logging.info(this.fmtLog(step.say));
       }
@@ -146,11 +153,14 @@ class RunTask {
         this.runtime.runTask(
           step.spawn,
           [...this.parents, this.task.name],
-          step.receiveArgs ? args : []
+          argsList
         );
       }
 
       const execs = step.exec ? [step.exec] : [];
+
+      // Parse step-specific environment variables
+      const env = this.evalEnvironment(step.env ?? {});
 
       if (step.builtin) {
         execs.push(this.renderBuiltin(step.builtin));
@@ -169,12 +179,10 @@ class RunTask {
           command = exec;
         }
 
-        if (step.receiveArgs) {
-          if (command.includes(ARGS_MARKER)) {
-            command = command.replace(ARGS_MARKER, args.join(" "));
-          } else {
-            command = [command, ...args].join(" ");
-          }
+        if (command.includes(ARGS_MARKER)) {
+          command = command.replace(ARGS_MARKER, argsList.join(" "));
+        } else {
+          command = [command, ...argsList].join(" ");
         }
 
         const cwd = step.cwd;
@@ -182,6 +190,7 @@ class RunTask {
           const result = this.shell({
             command,
             cwd,
+            extraEnv: env,
           });
           hasError = result.status !== 0;
         } catch (e) {
@@ -211,15 +220,15 @@ class RunTask {
    * evaluates to false (exits with non-zero), indicating that the task should
    * be skipped.
    */
-  private evalCondition(task: TaskSpec) {
+  private evalCondition(taskOrStep: TaskSpec | TaskStep) {
     // no condition, carry on
-    if (!task.condition) {
+    if (!taskOrStep.condition) {
       return true;
     }
 
-    this.log(chalk.gray(`${chalk.underline("condition")}: ${task.condition}`));
+    this.log(gray(`${underline("condition")}: ${taskOrStep.condition}`));
     const result = this.shell({
-      command: task.condition,
+      command: taskOrStep.condition,
       logprefix: "condition: ",
       quiet: true,
     });
@@ -228,6 +237,32 @@ class RunTask {
     } else {
       return false;
     }
+  }
+
+  /**
+   * Evaluates environment variables from shell commands (e.g. `$(xx)`)
+   */
+  private evalEnvironment(env: { [name: string]: string }) {
+    const output: { [name: string]: string | undefined } = {};
+
+    for (const [key, value] of Object.entries(env ?? {})) {
+      if (String(value).startsWith("$(") && String(value).endsWith(")")) {
+        const query = value.substring(2, value.length - 1);
+        const result = this.shellEval({ command: query });
+        if (result.status !== 0) {
+          const error = result.error
+            ? result.error.stack
+            : result.stderr?.toString() ?? "unknown error";
+          throw new Error(
+            `unable to evaluate environment variable ${key}=${value}: ${error}`
+          );
+        }
+        output[key] = result.stdout.toString("utf-8").trim();
+      } else {
+        output[key] = value;
+      }
+    }
+    return output;
   }
 
   /**
@@ -246,33 +281,13 @@ class RunTask {
       };
     }
 
-    // apply the task's environment last
+    // apply the task environment last
     env = {
       ...env,
       ...(this.task.env ?? {}),
     };
 
-    const output: { [name: string]: string | undefined } = {};
-
-    for (const [key, value] of Object.entries(env ?? {})) {
-      if (value.startsWith("$(") && value.endsWith(")")) {
-        const query = value.substring(2, value.length - 1);
-        const result = this.shellEval({ command: query });
-        if (result.status !== 0) {
-          const error = result.error
-            ? result.error.stack
-            : result.stderr?.toString() ?? "unknown error";
-          throw new Error(
-            `unable to evaluate environment variable ${key}=${value}: ${error}`
-          );
-        }
-        output[key] = result.stdout.toString("utf-8").trim();
-      } else {
-        output[key] = value;
-      }
-    }
-
-    return output;
+    return this.evalEnvironment(env ?? {});
   }
 
   /**
@@ -291,7 +306,7 @@ class RunTask {
   }
 
   private fmtLog(...args: any[]) {
-    return format(`${chalk.underline(this.fullname)} |`, ...args);
+    return format(`${underline(this.fullname)} |`, ...args);
   }
 
   private shell(options: ShellOptions) {
@@ -327,6 +342,7 @@ class RunTask {
       env: {
         ...process.env,
         ...this.env,
+        ...options.extraEnv,
       },
       ...options.spawnOptions,
     });
@@ -361,4 +377,5 @@ interface ShellOptions {
   readonly spawnOptions?: SpawnOptions;
   /** @default false */
   readonly quiet?: boolean;
+  readonly extraEnv?: { [name: string]: string | undefined };
 }
